@@ -1,4 +1,4 @@
-packages: .
+packages: . cabal-doctest*/ groups*/ lens*/
 repository head.hackage
   url: http://head.hackage.haskell.org/
   secure: True
@@ -7,12 +7,17 @@ repository head.hackage
              8f79fd2389ab2967354407ec852cbe73f2e8635793ac446d09461ffb99527f6e
   key-threshold: 3
 
-allow-newer: true
+allow-newer: all
 
+-- Can't use relative paths here so this way doesn't work
 --package lens
---  ghc-options: -fwrite-ide-info -hiedir=test/hie-files
+--  ghc-options: -fwrite-ide-info -hiedir=/home/matt/hie-lsif/test/hie-files
 
-package groups
-  ghc-options: -fwrite-ide-info -hiedir=/home/matt/hie-lsif/test/hie-files
+--package groups
+--  ghc-options: -fwrite-ide-info -hiedir=/home/matt/hie-lsif/test/hie-files
+
+--package profunctors
+--  ghc-options: -fwrite-ide-info -hiedir=/home/matt/hie-lsif/test/hie-files
+
 
 
