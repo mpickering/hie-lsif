@@ -1,2 +1,3 @@
 .ghc.env*
 dist-newstyle/
+test/hie-files/
