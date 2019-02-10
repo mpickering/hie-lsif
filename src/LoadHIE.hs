@@ -1,3 +1,4 @@
+{-# LANGUAGE TupleSections #-}
 module LoadHIE where
 
 import GHC
@@ -25,28 +26,33 @@ import Control.Monad.State.Strict
 import Control.Monad.Writer.Strict
 import Control.Monad.IO.Class
 
+import Data.Aeson
+
 import Data.Coerce
 
-newtype RefMap =
-  RefMap { getRefMap :: Map (OccName,ModuleName) (Set Span) }
+type References a = [Reference a]
 
-instance Semigroup RefMap where
-  (<>) = coerce $ M.unionWith (S.union)
+type RefMap = References TypeIndex
 
-instance Monoid RefMap where
-  mempty = RefMap (M.empty)
+type Reference a = (Span, Identifier, IdentifierDetails a)
+
+type Ref = Reference TypeIndex
 
 type DbMonad a = StateT NameCache (WriterT RefMap IO) a
 
-genRefMap :: HieFile -> RefMap
-genRefMap hf = toRefMap $ generateReferencesMap $ getAsts $ hie_asts hf
-  where
-    toRefMap = RefMap . M.fromList . go . M.toList
-    go = foldr go' []
-    go' (Right name,dets) acc
-      | Just mod <- nameModule_maybe name =
-          ((nameOccName name,moduleName mod), S.fromList $ map fst dets):acc
-    go' _ acc = acc
+generateReferencesList
+   :: Foldable f
+   => f (HieAST a)
+   -> References a
+generateReferencesList hie = foldr (\ast m -> go ast ++ m) [] hie
+   where
+     go :: HieAST a -> References a
+     go ast = this ++ concatMap go (nodeChildren ast)
+       where
+         this = map (\(a, b) -> (nodeSpan ast,a, b)) (M.toList (nodeIdentifiers $ nodeInfo ast))
+
+genRefMap :: HieFile -> References TypeIndex
+genRefMap hf = generateReferencesList $ getAsts $ hie_asts hf
 
 collectReferences :: FilePath -> DbMonad ()
 collectReferences path = do
@@ -85,24 +91,9 @@ data HieDbConf =
   , ofile :: FilePath
   }
 
-main :: IO ()
-main = do
-  args <- getArgs
-  hSetBuffering stdout NoBuffering
-  let conf = parseConf args
-  fs <- getHieFilesIn (in_dir conf)
-  putStr "Collecting data..."
-  refmap <- collectAllReferences fs
-  putStrLn " done"
-  interactive refmap
-
-printRefs :: Set Span -> IO ()
-printRefs sps = do
-  putStrLn "Referred to in: "
-  mapM_ print sps
-
+{-
 interactive :: RefMap -> IO ()
-interactive rf@(RefMap m) = do
+interactive rf = do
   putStrLn "\t 1) Type/Type Class"
   putStrLn "\t 2) Data Constructor"
   putStrLn "\t 3) Var"
@@ -131,3 +122,4 @@ parseConf ("-d":dir:xs) = (parseConf xs){in_dir = dir}
 parseConf ("-o":file:xs) = (parseConf xs){ofile = file}
 parseConf (dir:xs) = (parseConf xs){in_dir = dir}
 parseConf _ = HieDbConf "." "./out.hiedb"
+-}
