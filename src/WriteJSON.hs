@@ -43,6 +43,7 @@ import LoadHIE
 import qualified Data.HashMap.Lazy as H
 import qualified Data.Aeson.Encoding as E
 import qualified Data.ByteString.Lazy.Char8 as L
+import qualified Data.Map as M
 
 import Outputable
 
@@ -52,10 +53,18 @@ type Identifier = (OccName, ModuleName)
 
 type ResultSetMap = NameEnv Int
 type ReferenceResultMap = NameEnv Int
+type RangeMap = M.Map RealSrcSpan Int
+type ModuleMap = M.Map Module Int
 
 data MS = MS { counter :: !Int
              , resultSetMap :: ResultSetMap
-             , referenceResultMap :: ReferenceResultMap }
+             , referenceResultMap :: ReferenceResultMap
+             , rangeMap :: RangeMap
+             , exports :: [(Name, Int)]
+             , importMap :: ModuleMap }
+
+addExport :: Name -> Int -> M ()
+addExport n rid = modify (\st -> st { exports = (n, rid) : exports st })
 
 getId :: M Int
 getId = do
@@ -82,10 +91,44 @@ mkDocumentNode fp =
             , "type" .= ("vertex" :: Text) ]
   in uniqueNode val
 
+addImportedReference :: Int -> Module -> Name -> M ()
+addImportedReference use_range m n = do
+  im_r <- addImportedModule m
+  eii <- mkExternalImportItem n use_range
+  mkItemEdge im_r eii
+  return ()
+
+
+
+
+addImportedModule :: Module -> M Int
+addImportedModule m = do
+  ma <- gets importMap
+  case M.lookup m ma of
+    Just i  -> return i
+    Nothing -> do
+      liftIO $ print (moduleNameString (moduleName m))
+      i <- mkDocumentNode "/home/matt/hie-lsif/test/simple-tests/B.js"
+      ei <- mkExternalImportResult
+      mkImportsEdge i ei
+
+      modify (\s -> s { importMap = M.insert m ei ma } )
+      return i
+
+
 generateJSON :: FilePath -> RefMap -> M ()
 generateJSON fp m = do
   dn <- mkDocumentNode fp
   mapM_ (mkReferences dn) m
+  emitExports dn
+
+emitExports :: Int -> M ()
+emitExports dn = do
+  es <- gets exports
+  i <- mkExportResult es
+  void $ mkExportsEdge dn i
+
+
 
 getValBind :: S.Set ContextInfo -> Maybe ContextInfo
 getValBind s = find go (S.toList s)
@@ -107,7 +150,10 @@ mkReferences dn r@(s, Right id, id_details)
     rr <- mkReferenceResult id
     mkRefersTo def_range rs
     mkDefEdge rr def_range
-    mkReferencesEdge rr rs
+    mkReferencesEdge rs rr
+
+    -- Export
+    addExport id def_range
 
 
     liftIO $ print (s, occNameString (getOccName id), (identInfo id_details))
@@ -117,9 +163,15 @@ mkReferences dn r@(s, Right id, id_details)
     rr <- mkReferenceResult id
     mkRefersTo use_range rs
     mkRefEdge rr use_range
-    liftIO $ print (s, occNameString (getOccName id), (identInfo id_details))
+
+    case nameModule_maybe id of
+      Just m | not (isGoodSrcSpan (nameSrcSpan id))  -> void $ addImportedReference use_range m id
+      _ -> return ()
+    liftIO $ print (s, nameStableString id, nameSrcSpan id, occNameString (getOccName id), (identInfo id_details))
   | otherwise =
     liftIO $ print (s, occNameString (getOccName id), (identInfo id_details))
+mkReferences dn (s, Left mn, id_detail)  =
+  liftIO $ print (s, moduleNameString mn)
 
 nameToKey :: Name -> String
 nameToKey n = occNameString (getOccName n)
@@ -141,6 +193,30 @@ mkResultSet n = do
 vps :: Text -> [Pair]
 vps l = ["type" .= ("vertex" :: Text), "label" .= l ]
 
+mkExternalImportResult :: M Int
+mkExternalImportResult = uniqueNode $ vps "externalImportResult"
+
+mkImportsEdge from to = mkEdge from to "imports"
+
+mkExternalImportItem :: Name -> Int -> M Int
+mkExternalImportItem n rid = uniqueNode $ (vps "externalImportItem"
+                                          ++ (mkExpImpPairs n rid))
+
+mkItemEdge from to = mkEdge from to "item"
+
+
+mkExportResult :: [(Name, Int)] -> M Int
+mkExportResult es =
+  uniqueNode $ "result" .= (map (uncurry mkExportItem) es)
+                      : vps "exportResult"
+
+
+mkExpImpPairs name rid = [ "moniker" .= occNameString (getOccName name)
+                               , "rangeIds" .= [rid] ]
+
+mkExportItem :: Name -> Int -> Value
+mkExportItem n rid = object (mkExpImpPairs n rid)
+
 mkEdgeWithProp :: Maybe Text -> Int -> Int -> Text -> M Int
 mkEdgeWithProp mp from to l =
   uniqueNode $
@@ -157,6 +233,8 @@ mkSpan l c = object ["line" .= l, "character" .= c]
 
 mkRefersTo :: Int -> Int -> M Int
 mkRefersTo from to = mkEdge from to "refersTo"
+
+mkExportsEdge from to = mkEdge from to "exports"
 
 mkDefEdge from to = mkEdgeWithProp (Just "definition") from to "item"
 mkRefEdge from to = mkEdgeWithProp (Just "reference")  from to "item"
@@ -179,15 +257,23 @@ mkReferenceResult n = do
       return i
 
 
+-- LSIF indexes from 0 rather than 1
 mkRange :: Span -> M Int
-mkRange s =
-  uniqueNode $
-    "start" .= (mkSpan ls cs) : "end" .= (mkSpan le ce) : vps "range"
+mkRange s = do
+  m <- gets rangeMap
+  case M.lookup s m of
+    Just i -> return i
+    Nothing -> do
+      i <- uniqueNode $
+            "start" .= (mkSpan ls cs) : "end" .= (mkSpan le ce) : vps "range"
+      modify (\st -> st { rangeMap = M.insert s i m } )
+      return i
+
   where
     ls = srcSpanStartLine s - 1
-    cs = srcSpanStartCol s
+    cs = srcSpanStartCol s - 1
     le = srcSpanEndLine s - 1
-    ce = srcSpanEndCol s
+    ce = srcSpanEndCol s - 1
 
 -- | Make a range and put bind it to the document
 mkRangeIn :: Int -> Span -> M Int
@@ -198,10 +284,10 @@ mkRangeIn doc s = do
 
 
 
-initialState = MS 1 emptyNameEnv emptyNameEnv
+initialState = MS 1 emptyNameEnv emptyNameEnv M.empty [] M.empty
 
-writeJSON :: FilePath -> RefMap -> IO ()
-writeJSON fp r = do
+writeJSON :: FilePath -> RefMap -> FilePath -> RefMap -> IO ()
+writeJSON fp r fp2 r2 = do
   ref <- flip evalStateT initialState (execWriterT (generateJSON fp r))
   let res = encode ref
   L.writeFile "test.json" res
