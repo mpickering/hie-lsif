@@ -31,6 +31,7 @@ library
                        , text
                        , array
   hs-source-dirs:      src
+  ghc-options: -Wall
   default-language:    Haskell2010
 
 executable hie-lsif

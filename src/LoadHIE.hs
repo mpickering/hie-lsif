@@ -3,9 +3,7 @@
 module LoadHIE where
 
 import GHC
-import OccName
 import HieTypes
-import HieUtils
 import Name
 import NameCache
 import HieBin
@@ -15,25 +13,14 @@ import FastString
 
 
 import qualified Data.Map as M
-import Data.Map (Map)
-import qualified Data.Set as S
-import Data.Set (Set)
 
-import System.IO
-import System.Environment
 import System.Directory
 import System.FilePath
 
-import Control.Monad
 import Control.Monad.State.Strict
 import Control.Monad.Writer.Strict
-import Control.Monad.IO.Class
 
 import qualified Data.Array as A
-
-import Data.Aeson
-
-import Data.Coerce
 
 data LoadedHIE = LoadedHIE Module RefMap
 
@@ -64,9 +51,9 @@ generateReferencesList ty_array hie = foldr (\ast m -> print_and_go ast ++ m) []
          this = map (\(a, b) -> (ast,a, b)) (M.toList (nodeIdentifiers $ nodeInfo ast))
 
 genRefMap :: HieFile -> (FilePath, Module, References PrintedType)
-genRefMap hf = (fp, mod, generateReferencesList (hie_types hf) $ getAsts $ (hie_asts hf))
+genRefMap hf = (fp, ref_mod, generateReferencesList (hie_types hf) $ getAsts $ (hie_asts hf))
   where
-    mod = hie_module hf
+    ref_mod = hie_module hf
     fp  = hie_hs_file hf
 
 collectReferences :: FilePath -> DbMonad ()
@@ -185,7 +172,7 @@ recoverFullIfaceTypes flattened ast = fmap (unflattened A.!) ast
     go (HTyVarTy n) = getOccString n
     go (HAppTy a b) = wrap b (a ++ hieToIfaceArgs b)
     go (HLitTy l) = ifaceTyLit l
-    go (HForAllTy ((n,k),af) t) =
+    go (HForAllTy ((n,_k),_af) t) =
       "forall " ++ getOccString n ++ " . " ++ t
     go (HFunTy a b) = a ++ " -> " ++ b
     go (HQualTy con b) = con ++ " => " ++ b
@@ -208,4 +195,4 @@ recoverFullIfaceTypes flattened ast = fmap (unflattened A.!) ast
 
     ifaceTyLit :: IfaceTyLit -> PrintedType
     ifaceTyLit (IfaceNumTyLit n) = show n
-    ifaceTylit (IfaceStrTyLit fs) = "\"" ++ unpackFS fs ++ "\""
+    ifaceTyLit (IfaceStrTyLit fs) = "\"" ++ unpackFS fs ++ "\""

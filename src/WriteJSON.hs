@@ -7,47 +7,25 @@ module WriteJSON where
 import GHC
 import OccName
 import HieTypes hiding (Identifier)
-import HieUtils
 import Name
-import NameCache
-import HieBin
-import UniqSupply
 
 
 import qualified Data.Map as M
-import Data.Map (Map)
 import qualified Data.Set as S
-import Data.Set (Set)
-import Data.List
-
-import System.IO
-import System.Environment
-import System.Directory
-import System.FilePath
 
 import Control.Monad
-import Control.Monad.Identity
 import Control.Monad.State.Strict
 import Control.Monad.Writer.Strict
-import Control.Monad.IO.Class
-
 import NameEnv
 
 import Data.Aeson
 import Data.Aeson.Types
 
-import Data.Coerce
-
 import Data.Text(Text)
 
 import LoadHIE
 
-import qualified Data.HashMap.Lazy as H
-import qualified Data.Aeson.Encoding as E
 import qualified Data.ByteString.Lazy.Char8 as L
-import qualified Data.Map as M
-
-import Outputable
 
 type M a = WriterT [Value] (StateT MS IO) a
 
@@ -68,22 +46,8 @@ data MS = MS { counter :: !Int
 addExport :: Name -> Int -> M ()
 addExport n rid = modify (\st -> st { exports = (n, rid) : exports st })
 
-getId :: M Int
-getId = do
-  s <- gets counter
-  modify (\st -> st { counter = s + 1 })
-  return s
 
--- Tag a document with a unique ID
-uniqueNode :: [Pair] -> M Int
-uniqueNode o = do
-  val <- getId
-  tellOne (object ("id" .= val : o))
-  return val
-
-tellOne x = tell [x]
-
-
+prefix :: String
 prefix = "file://"
 
 mkDocumentNode :: FilePath -> FilePath -> M Int
@@ -124,12 +88,12 @@ addImportedModule m = do
 
 generateJSON :: FilePath -> ModRefs -> M ()
 generateJSON root m = do
-  rs <- mapM (\(fp, m, r) -> (,m, r) <$> mkDocumentNode root fp ) m
+  rs <- mapM (\(fp, ref_mod, r) -> (, ref_mod, r) <$> mkDocumentNode root fp ) m
   mapM_ do_one_file rs
 
   --emitExports dn
   where
-    do_one_file (dn, m, r) = mapM_ (mkReferences dn m) r
+    do_one_file (dn, ref_mod, r) = mapM_ (mkReferences dn ref_mod) r
 
 emitExports :: Int -> M ()
 emitExports dn = do
@@ -138,7 +102,7 @@ emitExports dn = do
   void $ mkExportsEdge dn i
 
 
-
+-- Decide whether a reference is a bind or not.
 getBind :: S.Set ContextInfo -> Maybe ContextInfo
 getBind s = msum $ map go (S.toList s)
   where
@@ -149,17 +113,17 @@ getBind s = msum $ map go (S.toList s)
 
 
 mkReferences :: Int -> Module -> Ref -> M ()
-mkReferences dn _ r@(ast, Right id, id_details)
-  | Just b <- getBind (identInfo id_details) = do
+mkReferences dn _ (ast, Right ref_id, id_details)
+  | Just {} <- getBind (identInfo id_details) = do
     -- Definition
     let s = nodeSpan ast
-    rs <- mkResultSet id
+    rs <- mkResultSet ref_id
     def_range <- mkRangeIn dn s
     def_result <- mkDefinitionResult def_range
     _ <- mkDefinitionEdge rs def_result
 
     -- Reference
-    rr <- mkReferenceResult id
+    rr <- mkReferenceResult ref_id
     mkRefersTo def_range rs
     mkDefEdge rr def_range
     mkReferencesEdge rs rr
@@ -168,12 +132,12 @@ mkReferences dn _ r@(ast, Right id, id_details)
     --addExport id def_range
 
 
-    liftIO $ print (s, occNameString (getOccName id), (identInfo id_details))
+    liftIO $ print (s, occNameString (getOccName ref_id), (identInfo id_details))
   | Use `S.member` identInfo id_details = do
     let s = nodeSpan ast
     use_range <- mkRangeIn dn s
-    rs <- mkResultSet id
-    rr <- mkReferenceResult id
+    rs <- mkResultSet ref_id
+    rr <- mkReferenceResult ref_id
     mkRefersTo use_range rs
     mkRefEdge rr use_range
     mkHover use_range ast
@@ -183,14 +147,31 @@ mkReferences dn _ r@(ast, Right id, id_details)
       Just m | not (isGoodSrcSpan (nameSrcSpan id))  -> void $ addImportedReference use_range m id
       _ -> return ()
       -}
-    liftIO $ print (s, nameStableString id, nameSrcSpan id, occNameString (getOccName id), (identInfo id_details))
+    liftIO $ print (s, nameStableString ref_id, nameSrcSpan ref_id, occNameString (getOccName ref_id), (identInfo id_details))
   | otherwise =
-    liftIO $ print (nodeSpan ast, occNameString (getOccName id), (identInfo id_details))
-mkReferences dn m (s, Left mn, id_detail)  =
+    liftIO $ print (nodeSpan ast, occNameString (getOccName ref_id), (identInfo id_details))
+mkReferences _ _ (s, Left mn, _)  =
   liftIO $ print (nodeSpan s , moduleNameString mn)
 
+
+
+
+initialState :: MS
+initialState = MS 1 emptyNameEnv emptyNameEnv M.empty [] M.empty
+
+writeJSON :: FilePath -> ModRefs -> IO ()
+writeJSON root r = do
+  ref <- flip evalStateT initialState (execWriterT (generateJSON root r))
+  let res = encode ref
+  L.writeFile "test.json" res
+
+
+
+-- JSON generation functions
+--
+
 nameToKey :: Name -> String
-nameToKey n = occNameString (getOccName n)
+nameToKey = getOccString
 
 -- For a given identifier, make the ResultSet node and add the mapping
 -- from that identifier to its result set
@@ -200,14 +181,22 @@ mkResultSet n = do
   case lookupNameEnv m n of
     Just i  -> return i
     Nothing -> do
-      i <- uniqueNode $ ("key"  .= nameToKey n)
-                   : vps "resultSet"
+      i <- mkResultSetWithKey n
       modify (\s -> s { resultSetMap = extendNameEnv m n i } )
       return i
 
 
-vps :: Text -> [Pair]
-vps l = ["type" .= ("vertex" :: Text), "label" .= l ]
+mkResultSetWithKey :: Name -> M Int
+mkResultSetWithKey n =
+  "resultSet" `vWith` ["key" .= nameToKey n]
+
+
+vWith :: Text -> [Pair] -> M Int
+vWith l as = uniqueNode $ as ++  ["type" .= ("vertex" :: Text), "label" .= l ]
+
+vertex :: Text -> M Int
+vertex t = t `vWith` []
+
 
 mkHover :: Int -> HieAST PrintedType -> M ()
 mkHover range_id node =
@@ -215,16 +204,14 @@ mkHover range_id node =
     Nothing -> return ()
     Just c  -> do
       hr_id <- mkHoverResult c
-      void $ mkHoverEdge range_id hr_id
+      mkHoverEdge range_id hr_id
 
 
-mkHoverEdge :: Int -> Int -> M Int
-mkHoverEdge from to = mkEdge from to "textDocument/hover"
 
 mkHoverResult :: Value -> M Int
 mkHoverResult c =
   let result = "result" .= (object [ "contents" .= c ])
-  in uniqueNode $ result : vps "hoverResult"
+  in "hoverResult" `vWith` [result]
 
 mkHoverContents :: HieAST PrintedType -> Maybe Value
 mkHoverContents Node{nodeInfo} =
@@ -233,44 +220,44 @@ mkHoverContents Node{nodeInfo} =
     (x:_) -> Just (object ["language" .= ("haskell" :: Text) , "value" .= x])
 
 mkExternalImportResult :: M Int
-mkExternalImportResult = uniqueNode $ vps "externalImportResult"
+mkExternalImportResult = vertex "externalImportResult"
 
-mkImportsEdge from to = mkEdge from to "imports"
 
 mkExternalImportItem :: Name -> Int -> M Int
-mkExternalImportItem n rid = uniqueNode $ (vps "externalImportItem"
-                                          ++ (mkExpImpPairs n rid))
-
-mkItemEdge from to = mkEdge from to "item"
+mkExternalImportItem n rid =
+  "externalImportItem" `vWith` mkExpImpPairs n rid
 
 
 mkExportResult :: [(Name, Int)] -> M Int
 mkExportResult es =
-  uniqueNode $ "result" .= (map (uncurry mkExportItem) es)
-                      : vps "exportResult"
+  "exportResult" `vWith` ["result" .= (map (uncurry mkExportItem) es)]
 
 
+mkExpImpPairs :: Name -> Int -> [Pair]
 mkExpImpPairs name rid = [ "moniker" .= occNameString (getOccName name)
-                               , "rangeIds" .= [rid] ]
+                         , "rangeIds" .= [rid] ]
 
 mkExportItem :: Name -> Int -> Value
 mkExportItem n rid = object (mkExpImpPairs n rid)
 
-mkEdgeWithProp :: Maybe Text -> Int -> Int -> Text -> M Int
+-- There are not higher equalities between edges.
+mkEdgeWithProp :: Maybe Text -> Int -> Int -> Text -> M ()
 mkEdgeWithProp mp from to l =
-  uniqueNode $
+  void . uniqueNode $
     [ "type" .= ("edge" :: Text)
     , "label" .= l
     , "outV" .= from
     , "inV"  .= to ] ++ ["property" .= p | Just p <- [mp] ]
 
-mkEdge :: Int -> Int -> Text -> M Int
+mkEdge :: Int -> Int -> Text -> M ()
 mkEdge = mkEdgeWithProp Nothing
 
 mkSpan :: Int -> Int -> Value
 mkSpan l c = object ["line" .= l, "character" .= c]
 
-mkRefersTo :: Int -> Int -> M Int
+mkRefersTo, mkContainsEdge, mkRefEdge, mkDefEdge, mkExportsEdge
+  , mkDefinitionEdge, mkReferencesEdge, mkItemEdge
+  , mkImportsEdge, mkHoverEdge :: Int -> Int -> M ()
 mkRefersTo from to = mkEdge from to "refersTo"
 
 mkExportsEdge from to = mkEdge from to "exports"
@@ -278,12 +265,19 @@ mkExportsEdge from to = mkEdge from to "exports"
 mkDefEdge from to = mkEdgeWithProp (Just "definition") from to "item"
 mkRefEdge from to = mkEdgeWithProp (Just "reference")  from to "item"
 
-mkContainsEdge from to = mkEdge from to "contains"
 
-mkDefinitionResult r = uniqueNode $ "result" .= r : vps "definitionResult"
+mkContainsEdge from to = mkEdge from to "contains"
 
 mkDefinitionEdge from to = mkEdge from to "textDocument/definition"
 mkReferencesEdge from to = mkEdge from to "textDocument/references"
+mkItemEdge from to = mkEdge from to "item"
+mkImportsEdge from to = mkEdge from to "imports"
+
+mkHoverEdge from to = mkEdge from to "textDocument/hover"
+
+mkDefinitionResult :: ToJSON v => v -> M Int
+mkDefinitionResult r =
+ "definitionResult" `vWith` ["result" .= r]
 
 mkReferenceResult :: Name -> M Int
 mkReferenceResult n = do
@@ -291,7 +285,7 @@ mkReferenceResult n = do
   case lookupNameEnv m n of
     Just i  -> return i
     Nothing -> do
-      i <- uniqueNode (vps "referenceResult")
+      i <- vertex "referenceResult"
       modify (\s -> s { referenceResultMap = extendNameEnv m n i } )
       return i
 
@@ -303,8 +297,8 @@ mkRange s = do
   case M.lookup s m of
     Just i -> return i
     Nothing -> do
-      i <- uniqueNode $
-            "start" .= (mkSpan ls cs) : "end" .= (mkSpan le ce) : vps "range"
+      i <- "range" `vWith`
+            ["start" .= (mkSpan ls cs), "end" .= (mkSpan le ce)]
       modify (\st -> st { rangeMap = M.insert s i m } )
       return i
 
@@ -318,17 +312,22 @@ mkRange s = do
 mkRangeIn :: Int -> Span -> M Int
 mkRangeIn doc s = do
   v <- mkRange s
-  mkContainsEdge doc v
+  void $ mkContainsEdge doc v
   return v
 
 
+getId :: M Int
+getId = do
+  s <- gets counter
+  modify (\st -> st { counter = s + 1 })
+  return s
 
-initialState = MS 1 emptyNameEnv emptyNameEnv M.empty [] M.empty
+-- Tag a document with a unique ID
+uniqueNode :: [Pair] -> M Int
+uniqueNode o = do
+  val <- getId
+  tellOne (object ("id" .= val : o))
+  return val
 
-writeJSON :: FilePath -> ModRefs -> IO ()
-writeJSON root r = do
-  ref <- flip evalStateT initialState (execWriterT (generateJSON root r))
-  let res = encode ref
-  L.writeFile "test.json" res
-
-
+tellOne :: MonadWriter [a] m => a -> m ()
+tellOne x = tell [x]
