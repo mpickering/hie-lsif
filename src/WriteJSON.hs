@@ -83,12 +83,11 @@ uniqueNode o = do
 
 tellOne x = tell [x]
 
-root = "/Users/matt/hie-lsif/test/simple-tests/"
 
 prefix = "file://"
 
-mkDocumentNode :: FilePath -> M Int
-mkDocumentNode fp =
+mkDocumentNode :: FilePath -> FilePath -> M Int
+mkDocumentNode root fp =
   let val = [ "label" .= ("document" :: Text)
             , "uri" .= (prefix ++ root ++ fp)
             , "languageId" .= ("haskell" :: Text)
@@ -123,9 +122,9 @@ addImportedModule m = do
       -}
 
 
-generateJSON :: ModRefs -> M ()
-generateJSON m = do
-  rs <- mapM (\(fp, m, r) -> (,m, r) <$> mkDocumentNode fp ) m
+generateJSON :: FilePath -> ModRefs -> M ()
+generateJSON root m = do
+  rs <- mapM (\(fp, m, r) -> (,m, r) <$> mkDocumentNode root fp ) m
   mapM_ do_one_file rs
 
   --emitExports dn
@@ -327,8 +326,8 @@ mkRangeIn doc s = do
 initialState = MS 1 emptyNameEnv emptyNameEnv M.empty [] M.empty
 
 writeJSON :: FilePath -> ModRefs -> IO ()
-writeJSON fp r = do
-  ref <- flip evalStateT initialState (execWriterT (generateJSON r))
+writeJSON root r = do
+  ref <- flip evalStateT initialState (execWriterT (generateJSON root r))
   let res = encode ref
   L.writeFile "test.json" res
 

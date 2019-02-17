@@ -7,9 +7,14 @@ fn = "file:///home/matt/hie-lsif/test/simple-tests/A.hs"
 mac_fn = "file:///Users/matt/hie-lsif/test/simple-tests/A.js"
 fn2 = "file:///home/matt/hie-lsif/test/simple-tests/A.js"
 
+root = "/Users/matt/hie-lsif/test/simple-tests/"
+root_groups = "/Users/matt/hie-lsif/groups-0.4.1.0/"
+
 
 main :: IO ()
 main = do
-  refs1 <- HIE.collectAllReferences ["test/simple-tests/A.hie"
-                                    ,"test/simple-tests/B.hie"]
-  HIE.writeJSON mac_fn refs1
+  fns <- HIE.getHieFilesIn "test/hie-files/"
+--  refs1 <- HIE.collectAllReferences ["test/simple-tests/A.hie"
+--                                    ,"test/simple-tests/B.hie"]
+  refs1 <- HIE.collectAllReferences fns
+  HIE.writeJSON root_groups refs1
