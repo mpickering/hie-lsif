@@ -116,6 +116,9 @@ getBind s = msum $ map go (S.toList s)
     go c = case c of
              ValBind {} -> Just c
              PatternBind {} -> Just c
+             TyVarBind {}   -> Just c
+             ClassTyDecl {} -> Just c
+             Decl {}        -> Just c
              _ -> Nothing
 
 
@@ -139,7 +142,7 @@ mkReferences dn _ (ast, Right ref_id, id_details)
     --addExport id def_range
 
 
-    liftIO $ print (s, occNameString (getOccName ref_id), (identInfo id_details))
+    --liftIO $ print (s, occNameString (getOccName ref_id), (identInfo id_details))
   | Use `S.member` identInfo id_details = do
     let s = nodeSpan ast
     use_range <- mkRangeIn dn s
@@ -154,7 +157,7 @@ mkReferences dn _ (ast, Right ref_id, id_details)
       Just m | not (isGoodSrcSpan (nameSrcSpan id))  -> void $ addImportedReference use_range m id
       _ -> return ()
       -}
-    liftIO $ print (s, nameStableString ref_id, nameSrcSpan ref_id, occNameString (getOccName ref_id), (identInfo id_details))
+    --liftIO $ print (s, nameStableString ref_id, nameSrcSpan ref_id, occNameString (getOccName ref_id), (identInfo id_details))
   | otherwise =
     liftIO $ print (nodeSpan ast, occNameString (getOccName ref_id), (identInfo id_details))
 mkReferences _ _ (s, Left mn, _)  =
