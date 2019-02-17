@@ -1,4 +1,5 @@
 {-# LANGUAGE TupleSections #-}
+{-# LANGUAGE NamedFieldPuns #-}
 module LoadHIE where
 
 import GHC
@@ -9,6 +10,8 @@ import Name
 import NameCache
 import HieBin
 import UniqSupply
+import IfaceType
+import FastString
 
 
 import qualified Data.Map as M
@@ -180,18 +183,29 @@ recoverFullIfaceTypes flattened ast = fmap (unflattened A.!) ast
      -- Unfold an 'HieType' whose subterms have already been unfolded
     go :: HieType PrintedType -> PrintedType
     go (HTyVarTy n) = getOccString n
-    go (HAppTy a b) = a ++ hieToIfaceArgs b
-    go (HLitTy l) = "TODO"
-    go (HForAllTy ((n,k),af) t) = "TODO"
-    go (HFunTy a b) = a ++ "->" ++ b
-    go (HQualTy con b) = "TODO"
-    go (HCastTy a) = "TODO"
-    go HCoercionTy = "TODO"
-    go (HTyConApp a xs) = "TODO"
+    go (HAppTy a b) = wrap b (a ++ hieToIfaceArgs b)
+    go (HLitTy l) = ifaceTyLit l
+    go (HForAllTy ((n,k),af) t) =
+      "forall " ++ getOccString n ++ " . " ++ t
+    go (HFunTy a b) = a ++ " -> " ++ b
+    go (HQualTy con b) = con ++ " => " ++ b
+    go (HCastTy a) = a
+    go HCoercionTy = "<co>"
+    go (HTyConApp (IfaceTyCon{ifaceTyConName}) xs) =
+      wrap xs $ (getOccString ifaceTyConName ++ " " ++ hieToIfaceArgs xs)
+
+    wrap (HieArgs args) =
+        case args of
+                 [] -> id
+                 _  -> \s -> "(" ++ s ++ ")"
 
     hieToIfaceArgs :: HieArgs PrintedType -> PrintedType
     hieToIfaceArgs (HieArgs args) = go' args
       where
         go' [] = ""
-        go' ((True ,x):xs) = x ++ go' xs
-        go' ((False,x):xs) = x ++ go' xs
+        go' ((True ,x):xs) = " " ++ x ++ go' xs
+        go' ((False,x):xs) = " " ++ x ++ go' xs
+
+    ifaceTyLit :: IfaceTyLit -> PrintedType
+    ifaceTyLit (IfaceNumTyLit n) = show n
+    ifaceTylit (IfaceStrTyLit fs) = "\"" ++ unpackFS fs ++ "\""
