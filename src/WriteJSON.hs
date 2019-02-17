@@ -139,16 +139,18 @@ emitExports dn = do
 
 
 
-getValBind :: S.Set ContextInfo -> Maybe ContextInfo
-getValBind s = find go (S.toList s)
+getBind :: S.Set ContextInfo -> Maybe ContextInfo
+getBind s = msum $ map go (S.toList s)
   where
-    go (ValBind {}) = True
-    go _ = False
+    go c = case c of
+             ValBind {} -> Just c
+             PatternBind {} -> Just c
+             _ -> Nothing
 
 
 mkReferences :: Int -> Module -> Ref -> M ()
 mkReferences dn _ r@(s, Right id, id_details)
-  | Just (ValBind bt sc (Just entire_span)) <- getValBind (identInfo id_details) = do
+  | Just b <- getBind (identInfo id_details) = do
     -- Definition
     rs <- mkResultSet id
     def_range <- mkRangeIn dn s
