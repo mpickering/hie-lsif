@@ -85,10 +85,17 @@ addImportedModule m = do
       return i
       -}
 
+mkDocument :: Int -> FilePath -> FilePath -> M Int
+mkDocument proj_node root fp = do
+  doc <- mkDocumentNode root fp
+  mkContainsEdge proj_node doc
+  return doc
+
 
 generateJSON :: FilePath -> ModRefs -> M ()
 generateJSON root m = do
-  rs <- mapM (\(fp, ref_mod, r) -> (, ref_mod, r) <$> mkDocumentNode root fp ) m
+  proj_node <- mkProjectVertex Nothing
+  rs <- mapM (\(fp, ref_mod, r) -> (, ref_mod, r) <$> mkDocument proj_node root fp ) m
   mapM_ do_one_file rs
 
   --emitExports dn
@@ -196,6 +203,12 @@ vWith l as = uniqueNode $ as ++  ["type" .= ("vertex" :: Text), "label" .= l ]
 
 vertex :: Text -> M Int
 vertex t = t `vWith` []
+
+
+mkProjectVertex :: Maybe FilePath -> M Int
+mkProjectVertex mcabal_file =
+  "project" `vWith` (["projectFile" .= ("file://" ++ fn) | Just fn <- [mcabal_file]]
+                    ++ ["language" .= ("haskell" :: Text)])
 
 
 mkHover :: Int -> HieAST PrintedType -> M ()
