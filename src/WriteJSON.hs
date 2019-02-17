@@ -1,6 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE TupleSections #-}
+{-# LANGUAGE NamedFieldPuns #-}
 module WriteJSON where
 
 import GHC
@@ -149,9 +150,10 @@ getBind s = msum $ map go (S.toList s)
 
 
 mkReferences :: Int -> Module -> Ref -> M ()
-mkReferences dn _ r@(s, Right id, id_details)
+mkReferences dn _ r@(ast, Right id, id_details)
   | Just b <- getBind (identInfo id_details) = do
     -- Definition
+    let s = nodeSpan ast
     rs <- mkResultSet id
     def_range <- mkRangeIn dn s
     def_result <- mkDefinitionResult def_range
@@ -169,11 +171,13 @@ mkReferences dn _ r@(s, Right id, id_details)
 
     liftIO $ print (s, occNameString (getOccName id), (identInfo id_details))
   | Use `S.member` identInfo id_details = do
+    let s = nodeSpan ast
     use_range <- mkRangeIn dn s
     rs <- mkResultSet id
     rr <- mkReferenceResult id
     mkRefersTo use_range rs
     mkRefEdge rr use_range
+    mkHover use_range ast
 
 {-
     case nameModule_maybe id of
@@ -182,9 +186,9 @@ mkReferences dn _ r@(s, Right id, id_details)
       -}
     liftIO $ print (s, nameStableString id, nameSrcSpan id, occNameString (getOccName id), (identInfo id_details))
   | otherwise =
-    liftIO $ print (s, occNameString (getOccName id), (identInfo id_details))
+    liftIO $ print (nodeSpan ast, occNameString (getOccName id), (identInfo id_details))
 mkReferences dn m (s, Left mn, id_detail)  =
-  liftIO $ print (s, moduleNameString mn)
+  liftIO $ print (nodeSpan s , moduleNameString mn)
 
 nameToKey :: Name -> String
 nameToKey n = occNameString (getOccName n)
@@ -205,6 +209,29 @@ mkResultSet n = do
 
 vps :: Text -> [Pair]
 vps l = ["type" .= ("vertex" :: Text), "label" .= l ]
+
+mkHover :: Int -> HieAST PrintedType -> M ()
+mkHover range_id node =
+  case mkHoverContents node of
+    Nothing -> return ()
+    Just c  -> do
+      hr_id <- mkHoverResult c
+      void $ mkHoverEdge range_id hr_id
+
+
+mkHoverEdge :: Int -> Int -> M Int
+mkHoverEdge from to = mkEdge from to "textDocument/hover"
+
+mkHoverResult :: Value -> M Int
+mkHoverResult c =
+  let result = "result" .= (object [ "contents" .= c ])
+  in uniqueNode $ result : vps "hoverResult"
+
+mkHoverContents :: HieAST PrintedType -> Maybe Value
+mkHoverContents Node{nodeInfo} =
+  case nodeType nodeInfo of
+    [] -> Nothing
+    (x:_) -> Just (object ["language" .= ("haskell" :: Text) , "value" .= x])
 
 mkExternalImportResult :: M Int
 mkExternalImportResult = uniqueNode $ vps "externalImportResult"
@@ -304,4 +331,5 @@ writeJSON fp r = do
   ref <- flip evalStateT initialState (execWriterT (generateJSON r))
   let res = encode ref
   L.writeFile "test.json" res
+
 

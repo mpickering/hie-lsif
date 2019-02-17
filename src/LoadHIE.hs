@@ -26,6 +26,8 @@ import Control.Monad.State.Strict
 import Control.Monad.Writer.Strict
 import Control.Monad.IO.Class
 
+import qualified Data.Array as A
+
 import Data.Aeson
 
 import Data.Coerce
@@ -34,29 +36,32 @@ data LoadedHIE = LoadedHIE Module RefMap
 
 type References a = [Reference a]
 
-type RefMap = References TypeIndex
+type RefMap = References PrintedType
 
-type Reference a = (Span, Identifier, IdentifierDetails a)
+type Reference a = (HieAST a, Identifier, IdentifierDetails a)
 
-type Ref = Reference TypeIndex
+type Ref = Reference PrintedType
 
-type ModRefs = [(FilePath, Module, References TypeIndex)]
+type ModRefs = [(FilePath, Module, References PrintedType)]
 
 type DbMonad a = StateT NameCache (WriterT ModRefs IO) a
 
 generateReferencesList
    :: Foldable f
-   => f (HieAST a)
-   -> References a
-generateReferencesList hie = foldr (\ast m -> go ast ++ m) [] hie
+   => A.Array TypeIndex HieTypeFlat
+   -> f (HieAST TypeIndex)
+   -> References PrintedType
+generateReferencesList ty_array hie = foldr (\ast m -> print_and_go ast ++ m) [] hie
    where
+     print_and_go = go . recoverFullIfaceTypes ty_array
+
      go :: HieAST a -> References a
      go ast = this ++ concatMap go (nodeChildren ast)
        where
-         this = map (\(a, b) -> (nodeSpan ast,a, b)) (M.toList (nodeIdentifiers $ nodeInfo ast))
+         this = map (\(a, b) -> (ast,a, b)) (M.toList (nodeIdentifiers $ nodeInfo ast))
 
-genRefMap :: HieFile -> (FilePath, Module, References TypeIndex)
-genRefMap hf = (fp, mod, generateReferencesList $ getAsts $ hie_asts hf)
+genRefMap :: HieFile -> (FilePath, Module, References PrintedType)
+genRefMap hf = (fp, mod, generateReferencesList (hie_types hf) $ getAsts $ (hie_asts hf))
   where
     mod = hie_module hf
     fp  = hie_hs_file hf
@@ -130,3 +135,63 @@ parseConf ("-o":file:xs) = (parseConf xs){ofile = file}
 parseConf (dir:xs) = (parseConf xs){in_dir = dir}
 parseConf _ = HieDbConf "." "./out.hiedb"
 -}
+
+----
+--
+-- Copied from haddock
+
+
+
+
+-- * HIE file procesddsing
+
+ -- This belongs in GHC's HieUtils...
+
+ -- | Pretty-printed type, ready to be turned into HTML by @xhtml@
+type PrintedType = String
+
+ -- | Expand the flattened HIE AST into one where the types printed out and
+-- ready for end-users to look at.
+--
+-- Using just primitives found in GHC's HIE utilities, we could write this as
+-- follows:
+--
+-- > 'recoverFullIfaceTypes' dflags hieTypes hieAst
+-- >     = 'fmap' (\ti -> 'showSDoc' df .
+-- >                      'pprIfaceType' $
+-- >                      'recoverFullType' ti hieTypes)
+-- >       hieAst
+--
+-- However, this is very inefficient (both in time and space) because the
+-- mutliple calls to 'recoverFullType' don't share intermediate results. This
+-- function fixes that.
+recoverFullIfaceTypes
+  :: A.Array TypeIndex HieTypeFlat -- ^ flat types
+  -> HieAST TypeIndex              -- ^ flattened AST
+  -> HieAST PrintedType       -- ^ full AST
+recoverFullIfaceTypes flattened ast = fmap (unflattened A.!) ast
+    where
+
+     -- The recursion in 'unflattened' is crucial - it's what gives us sharing
+    -- between the IfaceType's produced
+    unflattened :: A.Array TypeIndex PrintedType
+    unflattened = fmap (\flatTy -> go (fmap (unflattened A.!) flatTy)) flattened
+
+     -- Unfold an 'HieType' whose subterms have already been unfolded
+    go :: HieType PrintedType -> PrintedType
+    go (HTyVarTy n) = getOccString n
+    go (HAppTy a b) = a ++ hieToIfaceArgs b
+    go (HLitTy l) = "TODO"
+    go (HForAllTy ((n,k),af) t) = "TODO"
+    go (HFunTy a b) = a ++ "->" ++ b
+    go (HQualTy con b) = "TODO"
+    go (HCastTy a) = "TODO"
+    go HCoercionTy = "TODO"
+    go (HTyConApp a xs) = "TODO"
+
+    hieToIfaceArgs :: HieArgs PrintedType -> PrintedType
+    hieToIfaceArgs (HieArgs args) = go' args
+      where
+        go' [] = ""
+        go' ((True ,x):xs) = x ++ go' xs
+        go' ((False,x):xs) = x ++ go' xs
