@@ -1,5 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE TupleSections #-}
 module WriteJSON where
 
 import GHC
@@ -81,26 +82,30 @@ uniqueNode o = do
 
 tellOne x = tell [x]
 
+root = "/Users/matt/hie-lsif/test/simple-tests/"
 
+prefix = "file://"
 
 mkDocumentNode :: FilePath -> M Int
 mkDocumentNode fp =
   let val = [ "label" .= ("document" :: Text)
-            , "uri" .= fp
+            , "uri" .= (prefix ++ root ++ fp)
             , "languageId" .= ("haskell" :: Text)
             , "type" .= ("vertex" :: Text) ]
   in uniqueNode val
 
+{-
 addImportedReference :: Int -> Module -> Name -> M ()
 addImportedReference use_range m n = do
   im_r <- addImportedModule m
   eii <- mkExternalImportItem n use_range
   mkItemEdge im_r eii
   return ()
+  -}
 
 
 
-
+{-
 addImportedModule :: Module -> M Int
 addImportedModule m = do
   ma <- gets importMap
@@ -114,13 +119,17 @@ addImportedModule m = do
 
       modify (\s -> s { importMap = M.insert m ei ma } )
       return i
+      -}
 
 
-generateJSON :: FilePath -> RefMap -> M ()
-generateJSON fp m = do
-  dn <- mkDocumentNode fp
-  mapM_ (mkReferences dn) m
-  emitExports dn
+generateJSON :: ModRefs -> M ()
+generateJSON m = do
+  rs <- mapM (\(fp, m, r) -> (,m, r) <$> mkDocumentNode fp ) m
+  mapM_ do_one_file rs
+
+  --emitExports dn
+  where
+    do_one_file (dn, m, r) = mapM_ (mkReferences dn m) r
 
 emitExports :: Int -> M ()
 emitExports dn = do
@@ -137,8 +146,8 @@ getValBind s = find go (S.toList s)
     go _ = False
 
 
-mkReferences :: Int -> Ref -> M ()
-mkReferences dn r@(s, Right id, id_details)
+mkReferences :: Int -> Module -> Ref -> M ()
+mkReferences dn _ r@(s, Right id, id_details)
   | Just (ValBind bt sc (Just entire_span)) <- getValBind (identInfo id_details) = do
     -- Definition
     rs <- mkResultSet id
@@ -153,7 +162,7 @@ mkReferences dn r@(s, Right id, id_details)
     mkReferencesEdge rs rr
 
     -- Export
-    addExport id def_range
+    --addExport id def_range
 
 
     liftIO $ print (s, occNameString (getOccName id), (identInfo id_details))
@@ -164,13 +173,15 @@ mkReferences dn r@(s, Right id, id_details)
     mkRefersTo use_range rs
     mkRefEdge rr use_range
 
+{-
     case nameModule_maybe id of
       Just m | not (isGoodSrcSpan (nameSrcSpan id))  -> void $ addImportedReference use_range m id
       _ -> return ()
+      -}
     liftIO $ print (s, nameStableString id, nameSrcSpan id, occNameString (getOccName id), (identInfo id_details))
   | otherwise =
     liftIO $ print (s, occNameString (getOccName id), (identInfo id_details))
-mkReferences dn (s, Left mn, id_detail)  =
+mkReferences dn m (s, Left mn, id_detail)  =
   liftIO $ print (s, moduleNameString mn)
 
 nameToKey :: Name -> String
@@ -286,9 +297,9 @@ mkRangeIn doc s = do
 
 initialState = MS 1 emptyNameEnv emptyNameEnv M.empty [] M.empty
 
-writeJSON :: FilePath -> RefMap -> FilePath -> RefMap -> IO ()
-writeJSON fp r fp2 r2 = do
-  ref <- flip evalStateT initialState (execWriterT (generateJSON fp r))
+writeJSON :: FilePath -> ModRefs -> IO ()
+writeJSON fp r = do
+  ref <- flip evalStateT initialState (execWriterT (generateJSON r))
   let res = encode ref
   L.writeFile "test.json" res
 

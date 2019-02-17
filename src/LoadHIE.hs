@@ -30,6 +30,8 @@ import Data.Aeson
 
 import Data.Coerce
 
+data LoadedHIE = LoadedHIE Module RefMap
+
 type References a = [Reference a]
 
 type RefMap = References TypeIndex
@@ -38,7 +40,9 @@ type Reference a = (Span, Identifier, IdentifierDetails a)
 
 type Ref = Reference TypeIndex
 
-type DbMonad a = StateT NameCache (WriterT RefMap IO) a
+type ModRefs = [(FilePath, Module, References TypeIndex)]
+
+type DbMonad a = StateT NameCache (WriterT ModRefs IO) a
 
 generateReferencesList
    :: Foldable f
@@ -51,17 +55,20 @@ generateReferencesList hie = foldr (\ast m -> go ast ++ m) [] hie
        where
          this = map (\(a, b) -> (nodeSpan ast,a, b)) (M.toList (nodeIdentifiers $ nodeInfo ast))
 
-genRefMap :: HieFile -> References TypeIndex
-genRefMap hf = generateReferencesList $ getAsts $ hie_asts hf
+genRefMap :: HieFile -> (FilePath, Module, References TypeIndex)
+genRefMap hf = (fp, mod, generateReferencesList $ getAsts $ hie_asts hf)
+  where
+    mod = hie_module hf
+    fp  = hie_hs_file hf
 
 collectReferences :: FilePath -> DbMonad ()
 collectReferences path = do
   nc <- get
   (hiefile, nc') <- liftIO $ readHieFile nc path
   put nc'
-  tell $ genRefMap hiefile
+  tell $ [genRefMap hiefile]
 
-collectAllReferences :: [FilePath] -> IO RefMap
+collectAllReferences :: [FilePath] -> IO ModRefs
 collectAllReferences xs = do
   uniq_supply <- mkSplitUniqSupply 'z'
   let nc = initNameCache uniq_supply []
