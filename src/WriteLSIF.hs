@@ -2,7 +2,8 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE TupleSections #-}
 {-# LANGUAGE NamedFieldPuns #-}
-module WriteJSON where
+{- Generate an LSIF file from an HIE file -}
+module WriteLSIF where
 
 import GHC
 import OccName
@@ -30,81 +31,100 @@ import Streaming
 
 import qualified Data.ByteString.Lazy.Char8 as L
 
-type M a =  Stream (Of Value) (StateT MS IO) a
+import NameCache
+import HieBin
+import UniqSupply
 
-type Identifier = (OccName, ModuleName)
+type ModRef = (FilePath, Module, References PrintedType)
+
+type IndexM a = StateT IndexS IO a
+
+type IndexStreamG v a =  Stream (Of v) (StateT IndexS IO) a
+
+type IndexStream a = IndexStreamG Value a
+
+{- Global state of the indexer -}
 
 type ResultSetMap = NameEnv Int
 type ReferenceResultMap = NameEnv Int
 type RangeMap = M.Map RealSrcSpan Int
 type ModuleMap = M.Map Module Int
 
-data MS = MS { counter :: !Int
+data IndexS = IndexS
+             { counter :: !Int
+             , nameCache :: NameCache
              , resultSetMap :: ResultSetMap
              , referenceResultMap :: ReferenceResultMap
              , rangeMap :: RangeMap
+             -- Unused at the moment
              , exports :: [(Name, Int)]
              , importMap :: ModuleMap }
 
-addExport :: Name -> Int -> M ()
+initialState :: IO IndexS
+initialState = do
+  uniq_supply <- mkSplitUniqSupply 'z'
+  let nc = initNameCache uniq_supply []
+  return $ IndexS 1 nc emptyNameEnv emptyNameEnv M.empty [] M.empty
+
+addExport :: Name -> Int -> IndexStream ()
 addExport n rid = modify (\st -> st { exports = (n, rid) : exports st })
 
-prefix :: String
-prefix = "file://"
+{- Top level entry point -}
 
-mkDocumentNode :: FilePath -> FilePath -> M Int
-mkDocumentNode root fp =
-  let val = [ "label" .= ("document" :: Text)
-            , "uri" .= (prefix ++ root ++ fp)
-            , "languageId" .= ("haskell" :: Text)
-            , "type" .= ("vertex" :: Text) ]
-  in uniqueNode val
+generateFromDir :: FilePath -> FilePath -> IO ()
+generateFromDir root hie_dir =
+  getHieFilesIn hie_dir >>= writeJSON root . collectAllReferences
 
-{-
-addImportedReference :: Int -> Module -> Name -> M ()
-addImportedReference use_range m n = do
-  im_r <- addImportedModule m
-  eii <- mkExternalImportItem n use_range
-  mkItemEdge im_r eii
-  return ()
-  -}
+{- Read files into the stream, this ensures only one HIE file is in memory at once -}
+
+collectAllReferences :: [FilePath] -> IndexStreamG ModRef ()
+collectAllReferences xs = St.mapM collectReferences (St.each xs)
+
+collectReferences :: FilePath -> IndexM ModRef
+collectReferences path = do
+  nc <- gets nameCache
+  (hiefile, nc') <- liftIO $ readHieFile nc path
+  modify (\s -> s { nameCache = nc' })
+  return (genRefMap hiefile)
+
+{- Convert an HIE file into a LSIF file -}
+
+writeJSON :: FilePath -> IndexStreamG ModRef () -> IO ()
+writeJSON root r = do
+  writeLSIF (generateJSON root r)
+
+-- LSIF needs to write an array but we have a stream of objects so
+-- we have to fake the list part, it's really annoying.
+writeLSIF :: Stream (Of Value) (StateT IndexS IO) r -> IO r
+writeLSIF s = do
+  is <- initialState
+  h <- IO.openFile "test.json" IO.WriteMode
+  IO.hPutChar h '['
+  r <- flip evalStateT is . St.toHandle h . St.intersperse "," . St.map (L.unpack . encode) $ s
+  IO.hPutChar h ']'
+  IO.hClose h
+  return r
+
+{- Start making the aeson values to output -}
+
+generateJSON :: FilePath -> IndexStreamG ModRef () -> IndexStream ()
+generateJSON root m = do
+  proj_node <- mkProjectVertex Nothing
+  (St.for m (do_one_file proj_node))
+  where
+    do_one_file :: Int -> ModRef -> IndexStream ()
+    do_one_file proj_node (fp, ref_mod, r) = do
+      dn <- mkDocument proj_node root fp
+      St.for (St.each r) (mkReferences dn ref_mod)
 
 
-
-{-
-addImportedModule :: Module -> M Int
-addImportedModule m = do
-  ma <- gets importMap
-  case M.lookup m ma of
-    Just i  -> return i
-    Nothing -> do
-      liftIO $ print (moduleNameString (moduleName m))
-      i <- mkDocumentNode "/home/matt/hie-lsif/test/simple-tests/B.js"
-      ei <- mkExternalImportResult
-      mkImportsEdge i ei
-
-      modify (\s -> s { importMap = M.insert m ei ma } )
-      return i
-      -}
-
-mkDocument :: Int -> FilePath -> FilePath -> M Int
+mkDocument :: Int -> FilePath -> FilePath -> IndexStream Int
 mkDocument proj_node root fp = do
   doc <- mkDocumentNode root fp
   mkContainsEdge proj_node doc
   return doc
 
-
-generateJSON :: FilePath -> ModRefs -> M ()
-generateJSON root m = do
-  proj_node <- mkProjectVertex Nothing
-  rs <- mapM (\(fp, ref_mod, r) -> (, ref_mod, r) <$> mkDocument proj_node root fp ) m
-  mapM_ do_one_file rs
-
-  --emitExports dn
-  where
-    do_one_file (dn, ref_mod, r) = mapM_ (mkReferences dn ref_mod) r
-
-emitExports :: Int -> M ()
+emitExports :: Int -> IndexStream ()
 emitExports dn = do
   es <- gets exports
   i <- mkExportResult es
@@ -123,8 +143,8 @@ getBind s = msum $ map go (S.toList s)
              Decl {}        -> Just c
              _ -> Nothing
 
-
-mkReferences :: Int -> Module -> Ref -> M ()
+-- Main function which makes the references/definition entries and emits them
+mkReferences :: Int -> Module -> Ref -> IndexStream ()
 mkReferences dn _ (ast, Right ref_id, id_details)
   | Just {} <- getBind (identInfo id_details) = do
     -- Definition
@@ -166,33 +186,26 @@ mkReferences _ _ (s, Left mn, _)  =
   liftIO $ print (nodeSpan s , moduleNameString mn)
 
 
-
-
-initialState :: MS
-initialState = MS 1 emptyNameEnv emptyNameEnv M.empty [] M.empty
-
-writeJSON :: FilePath -> ModRefs -> IO ()
-writeJSON root r = do
-  writeLSIF (generateJSON root r)
-
-writeLSIF :: Stream (Of Value) (StateT MS IO) r -> IO r
-writeLSIF s = do
-  h <- IO.openFile "test.json" IO.WriteMode
-  IO.hPutChar h '['
-  r <- flip evalStateT initialState . St.toHandle h . St.map (L.unpack . encode) $ s
-  IO.hPutChar h ']'
-  IO.hClose h
-  return r
-
 -- JSON generation functions
 --
 
 nameToKey :: Name -> String
 nameToKey = getOccString
 
+prefix :: String
+prefix = "file://"
+
+mkDocumentNode :: FilePath -> FilePath -> IndexStream Int
+mkDocumentNode root fp =
+  let val = [ "label" .= ("document" :: Text)
+            , "uri" .= (prefix ++ root ++ fp)
+            , "languageId" .= ("haskell" :: Text)
+            , "type" .= ("vertex" :: Text) ]
+  in uniqueNode val
+
 -- For a given identifier, make the ResultSet node and add the mapping
 -- from that identifier to its result set
-mkResultSet :: Name -> M Int
+mkResultSet :: Name -> IndexStream Int
 mkResultSet n = do
   m <- gets resultSetMap
   case lookupNameEnv m n of
@@ -203,25 +216,25 @@ mkResultSet n = do
       return i
 
 
-mkResultSetWithKey :: Name -> M Int
+mkResultSetWithKey :: Name -> IndexStream Int
 mkResultSetWithKey n =
   "resultSet" `vWith` ["key" .= nameToKey n]
 
 
-vWith :: Text -> [Pair] -> M Int
+vWith :: Text -> [Pair] -> IndexStream Int
 vWith l as = uniqueNode $ as ++  ["type" .= ("vertex" :: Text), "label" .= l ]
 
-vertex :: Text -> M Int
+vertex :: Text -> IndexStream Int
 vertex t = t `vWith` []
 
 
-mkProjectVertex :: Maybe FilePath -> M Int
+mkProjectVertex :: Maybe FilePath -> IndexStream Int
 mkProjectVertex mcabal_file =
   "project" `vWith` (["projectFile" .= ("file://" ++ fn) | Just fn <- [mcabal_file]]
                     ++ ["language" .= ("haskell" :: Text)])
 
 
-mkHover :: Int -> HieAST PrintedType -> M ()
+mkHover :: Int -> HieAST PrintedType -> IndexStream ()
 mkHover range_id node =
   case mkHoverContents node of
     Nothing -> return ()
@@ -231,7 +244,7 @@ mkHover range_id node =
 
 
 
-mkHoverResult :: Value -> M Int
+mkHoverResult :: Value -> IndexStream Int
 mkHoverResult c =
   let result = "result" .= (object [ "contents" .= c ])
   in "hoverResult" `vWith` [result]
@@ -242,16 +255,16 @@ mkHoverContents Node{nodeInfo} =
     [] -> Nothing
     (x:_) -> Just (object ["language" .= ("haskell" :: Text) , "value" .= x])
 
-mkExternalImportResult :: M Int
+mkExternalImportResult :: IndexStream Int
 mkExternalImportResult = vertex "externalImportResult"
 
 
-mkExternalImportItem :: Name -> Int -> M Int
+mkExternalImportItem :: Name -> Int -> IndexStream Int
 mkExternalImportItem n rid =
   "externalImportItem" `vWith` mkExpImpPairs n rid
 
 
-mkExportResult :: [(Name, Int)] -> M Int
+mkExportResult :: [(Name, Int)] -> IndexStream Int
 mkExportResult es =
   "exportResult" `vWith` ["result" .= (map (uncurry mkExportItem) es)]
 
@@ -264,7 +277,7 @@ mkExportItem :: Name -> Int -> Value
 mkExportItem n rid = object (mkExpImpPairs n rid)
 
 -- There are not higher equalities between edges.
-mkEdgeWithProp :: Maybe Text -> Int -> Int -> Text -> M ()
+mkEdgeWithProp :: Maybe Text -> Int -> Int -> Text -> IndexStream ()
 mkEdgeWithProp mp from to l =
   void . uniqueNode $
     [ "type" .= ("edge" :: Text)
@@ -272,7 +285,7 @@ mkEdgeWithProp mp from to l =
     , "outV" .= from
     , "inV"  .= to ] ++ ["property" .= p | Just p <- [mp] ]
 
-mkEdge :: Int -> Int -> Text -> M ()
+mkEdge :: Int -> Int -> Text -> IndexStream ()
 mkEdge = mkEdgeWithProp Nothing
 
 mkSpan :: Int -> Int -> Value
@@ -280,7 +293,7 @@ mkSpan l c = object ["line" .= l, "character" .= c]
 
 mkRefersTo, mkContainsEdge, mkRefEdge, mkDefEdge, mkExportsEdge
   , mkDefinitionEdge, mkReferencesEdge, mkItemEdge
-  , mkImportsEdge, mkHoverEdge :: Int -> Int -> M ()
+  , mkImportsEdge, mkHoverEdge :: Int -> Int -> IndexStream ()
 mkRefersTo from to = mkEdge from to "refersTo"
 
 mkExportsEdge from to = mkEdge from to "exports"
@@ -298,11 +311,11 @@ mkImportsEdge from to = mkEdge from to "imports"
 
 mkHoverEdge from to = mkEdge from to "textDocument/hover"
 
-mkDefinitionResult :: ToJSON v => v -> M Int
+mkDefinitionResult :: ToJSON v => v -> IndexStream Int
 mkDefinitionResult r =
  "definitionResult" `vWith` ["result" .= r]
 
-mkReferenceResult :: Name -> M Int
+mkReferenceResult :: Name -> IndexStream Int
 mkReferenceResult n = do
   m <- gets referenceResultMap
   case lookupNameEnv m n of
@@ -314,7 +327,7 @@ mkReferenceResult n = do
 
 
 -- LSIF indexes from 0 rather than 1
-mkRange :: Span -> M Int
+mkRange :: Span -> IndexStream Int
 mkRange s = do
   m <- gets rangeMap
   case M.lookup s m of
@@ -332,25 +345,49 @@ mkRange s = do
     ce = srcSpanEndCol s - 1
 
 -- | Make a range and put bind it to the document
-mkRangeIn :: Int -> Span -> M Int
+mkRangeIn :: Int -> Span -> IndexStream Int
 mkRangeIn doc s = do
   v <- mkRange s
   void $ mkContainsEdge doc v
   return v
 
-
-getId :: M Int
+getId :: IndexStream Int
 getId = do
   s <- gets counter
   modify (\st -> st { counter = s + 1 })
   return s
 
 -- Tag a document with a unique ID
-uniqueNode :: [Pair] -> M Int
+uniqueNode :: [Pair] -> IndexStream Int
 uniqueNode o = do
   val <- getId
   tellOne (object ("id" .= val : o))
   return val
 
-tellOne :: a -> Stream (Of a) (StateT MS IO) ()
+tellOne :: a -> Stream (Of a) (StateT IndexS IO) ()
 tellOne x = St.yield x
+
+{-
+addImportedReference :: Int -> Module -> Name -> IndexStream ()
+addImportedReference use_range m n = do
+  im_r <- addImportedModule m
+  eii <- mkExternalImportItem n use_range
+  mkItemEdge im_r eii
+  return ()
+  -}
+
+{-
+addImportedModule :: Module -> IndexStream Int
+addImportedModule m = do
+  ma <- gets importMap
+  case M.lookup m ma of
+    Just i  -> return i
+    Nothing -> do
+      liftIO $ print (moduleNameString (moduleName m))
+      i <- mkDocumentNode "/home/matt/hie-lsif/test/simple-tests/B.js"
+      ei <- mkExternalImportResult
+      mkImportsEdge i ei
+
+      modify (\s -> s { importMap = M.insert m ei ma } )
+      return i
+      -}

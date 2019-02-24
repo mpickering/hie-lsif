@@ -5,36 +5,25 @@ module LoadHIE where
 import GHC
 import HieTypes
 import Name
-import NameCache
-import HieBin
-import UniqSupply
 import IfaceType
 import FastString
 
-
+import qualified Data.Array as A
 import qualified Data.Map as M
 
 import System.Directory
 import System.FilePath
 
-import Control.Monad.State.Strict
-import Control.Monad.Writer.Strict
-
-import qualified Data.Array as A
-
-data LoadedHIE = LoadedHIE Module RefMap
 
 type References a = [Reference a]
 
 type RefMap = References PrintedType
 
-type Reference a = (HieAST a, Identifier, IdentifierDetails a)
+type Reference a = (HieAST a, HieTypes.Identifier, IdentifierDetails a)
 
 type Ref = Reference PrintedType
 
-type ModRefs = [(FilePath, Module, References PrintedType)]
-
-type DbMonad a = StateT NameCache (WriterT ModRefs IO) a
+{- Reading a single HIE file -}
 
 generateReferencesList
    :: Foldable f
@@ -44,7 +33,6 @@ generateReferencesList
 generateReferencesList ty_array hie = foldr (\ast m -> print_and_go ast ++ m) [] hie
    where
      print_and_go = go . recoverFullIfaceTypes ty_array
-
      go :: HieAST a -> References a
      go ast = this ++ concatMap go (nodeChildren ast)
        where
@@ -56,19 +44,7 @@ genRefMap hf = (fp, ref_mod, generateReferencesList (hie_types hf) $ getAsts $ (
     ref_mod = hie_module hf
     fp  = hie_hs_file hf
 
-collectReferences :: FilePath -> DbMonad ()
-collectReferences path = do
-  nc <- get
-  (hiefile, nc') <- liftIO $ readHieFile nc path
-  put nc'
-  tell $ [genRefMap hiefile]
 
-collectAllReferences :: [FilePath] -> IO ModRefs
-collectAllReferences xs = do
-  uniq_supply <- mkSplitUniqSupply 'z'
-  let nc = initNameCache uniq_supply []
-  execWriterT $ flip evalStateT nc
-              $ mapM_ collectReferences xs
 
 -- | Recursively search for .hie files in given directory
 getHieFilesIn :: FilePath -> IO [FilePath]
@@ -93,38 +69,8 @@ data HieDbConf =
   , ofile :: FilePath
   }
 
-{-
-interactive :: RefMap -> IO ()
-interactive rf = do
-  putStrLn "\t 1) Type/Type Class"
-  putStrLn "\t 2) Data Constructor"
-  putStrLn "\t 3) Var"
-  putStr "Choose Name Space(default 3): "
-  n <- getLine
-  let ns = case reads n of
-        (1,_):_ -> tcClsName
-        (2,_):_ -> dataName
-        _ -> varName
-  putStr "Enter module: "
-  mod <- getLine
-  putStr "Enter name: "
-  name <- getLine
 
-  case M.lookup (mkOccName ns name, mkModuleName mod) m of
-    Just refs -> printRefs refs
-    Nothing -> putStrLn "Not found"
 
-  putStr "q to quit, otherwise continue"
-  c <- getLine
-  when (c /= "q") $ interactive rf
-
-parseConf :: [String] -> HieDbConf
-parseConf [dir,out] = HieDbConf dir out
-parseConf ("-d":dir:xs) = (parseConf xs){in_dir = dir}
-parseConf ("-o":file:xs) = (parseConf xs){ofile = file}
-parseConf (dir:xs) = (parseConf xs){in_dir = dir}
-parseConf _ = HieDbConf "." "./out.hiedb"
--}
 
 ----
 --
