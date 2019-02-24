@@ -15,7 +15,6 @@ import qualified Data.Set as S
 
 import Control.Monad
 import Control.Monad.State.Strict
-import Control.Monad.Writer.Strict
 import NameEnv
 
 import Data.Aeson
@@ -25,9 +24,13 @@ import Data.Text(Text)
 
 import LoadHIE
 
+import qualified Streaming.Prelude as St
+import qualified System.IO as IO
+import Streaming
+
 import qualified Data.ByteString.Lazy.Char8 as L
 
-type M a = WriterT [Value] (StateT MS IO) a
+type M a =  Stream (Of Value) (StateT MS IO) a
 
 type Identifier = (OccName, ModuleName)
 
@@ -45,7 +48,6 @@ data MS = MS { counter :: !Int
 
 addExport :: Name -> Int -> M ()
 addExport n rid = modify (\st -> st { exports = (n, rid) : exports st })
-
 
 prefix :: String
 prefix = "file://"
@@ -171,11 +173,16 @@ initialState = MS 1 emptyNameEnv emptyNameEnv M.empty [] M.empty
 
 writeJSON :: FilePath -> ModRefs -> IO ()
 writeJSON root r = do
-  ref <- flip evalStateT initialState (execWriterT (generateJSON root r))
-  let res = encode ref
-  L.writeFile "test.json" res
+  writeLSIF (generateJSON root r)
 
-
+writeLSIF :: Stream (Of Value) (StateT MS IO) r -> IO r
+writeLSIF s = do
+  h <- IO.openFile "test.json" IO.WriteMode
+  IO.hPutChar h '['
+  r <- flip evalStateT initialState . St.toHandle h . St.map (L.unpack . encode) $ s
+  IO.hPutChar h ']'
+  IO.hClose h
+  return r
 
 -- JSON generation functions
 --
@@ -345,5 +352,5 @@ uniqueNode o = do
   tellOne (object ("id" .= val : o))
   return val
 
-tellOne :: MonadWriter [a] m => a -> m ()
-tellOne x = tell [x]
+tellOne :: a -> Stream (Of a) (StateT MS IO) ()
+tellOne x = St.yield x
