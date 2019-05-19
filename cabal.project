@@ -9,6 +9,8 @@ repository head.hackage
 
 allow-newer: all
 
+constraints: primitive == 0.6.4.0
+
 -- Can't use relative paths here so this way doesn't work
 --package lens
 --  ghc-options: -fwrite-ide-info -hiedir=/home/matt/hie-lsif/test/hie-files
