@@ -1,3 +1,4 @@
 .ghc.env*
 dist-newstyle/
 test/hie-files/
+cabal.project.local
