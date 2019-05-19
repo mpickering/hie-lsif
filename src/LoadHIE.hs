@@ -7,6 +7,7 @@ import HieTypes
 import Name
 import IfaceType
 import FastString
+import Data.List
 
 import qualified Data.Array as A
 import qualified Data.Map as M

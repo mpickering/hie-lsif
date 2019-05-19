@@ -1,4 +1,4 @@
-packages: . cabal-doctest*/ groups*/ lens*/
+packages: . groups*/ lens*/
 repository head.hackage
   url: http://head.hackage.haskell.org/
   secure: True

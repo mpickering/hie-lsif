@@ -341,7 +341,7 @@ library
   if flag(j) && impl(ghc>=7.8)
     ghc-options: -j4
 
-  ghc-options: -Wall -fwarn-tabs -O2 -fdicts-cheap -funbox-strict-fields -fmax-simplifier-iterations=10 -fwrite-ide-info -hiedir=../test/hie-files
+  ghc-options: -Wall -fwarn-tabs -O2 -fdicts-cheap -funbox-strict-fields -fmax-simplifier-iterations=10 -fwrite-ide-info -hiedir=../test/hie-files/lens
 
   hs-source-dirs: src
 
