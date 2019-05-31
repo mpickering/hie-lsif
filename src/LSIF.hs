@@ -38,8 +38,14 @@ import Data.Proxy
 Hacks to get avoid boilerplate when constructing elements.
 -}
 
-type Constr a = Args (Rep a) a -- ^ Type of the constructor for A without `Empty`s
+type Constr a = Args (Rep a) a
+-- ^ Type of the constructor for A without `Empty`s
+-- For example, given a type
+-- data X = X Empty Empty Int Empty Bool Empty String,
+-- Constr X = Int -> Bool -> String -> X
 
+-- | Args is used to compute Constr by matching
+-- on the generic representation (Rep) of a type
 type family Args a r where
   Args (M1 k m c1) r = Args c1 r
   Args (a :*: b) r = Args a (Args b r)
@@ -47,7 +53,14 @@ type family Args a r where
   Args (K1 m a) r = a -> r
   Args U1 r = r
 
+-- | Typeclass to compute Constr/Args by traversing the generic representation
+-- of a type, and filling in `Nothing`s(Unit constructors) wherever an
+-- `Empty` type is accepted by the constructor
 class MkConstr f where
+  -- | Accepts a continuation that we can apply to the final result type.
+  -- This allows us to build up our modified constructor recursively, as
+  -- well as allowing us to turn the final `Rep` result back into
+  -- our original type in mkConstr
   mkConstr' :: forall r a. (f a -> r) -> Args f r
 
 instance MkConstr c1 => MkConstr (M1 k m c1) where
@@ -56,15 +69,24 @@ instance MkConstr c1 => MkConstr (M1 k m c1) where
 instance (MkConstr a, MkConstr b) => MkConstr (a :*: b) where
   mkConstr' k = mkConstr' (\x -> mkConstr' (k . (\y -> x :*: y)))
 
-instance {-# OVERLAPPABLE #-} MkConstr (K1 m a) where
-  mkConstr' k = unsafeCoerce $ k . K1
-
+-- If a given field is `Empty`, fill it in with its sole constructor:
+-- `Nothing`
 instance MkConstr (K1 m Empty) where
   mkConstr' k = k (K1 Nothing)
+
+instance {-# OVERLAPPABLE #-} MkConstr (K1 m a) where
+  mkConstr' k = unsafeCoerce $ k . K1
+      -- This is safe as the only reason GHC is not able
+      -- to reduce `Args (K1 m a) r` to `a -> r` is because
+      -- of the overlapping type pattern:
+      -- `Args (K1 m Empty) r = r`
+      -- However, when `(a ~ Empty)`, the overlapping instance above
+      -- for `MkConstr (K1 m Empty)` will be selected instead
 
 instance MkConstr U1 where
   mkConstr' k = k U1
 
+-- | Given a type as a Proxy argument, compute its Constr
 mkConstr :: forall r. (MkConstr (Rep r), Generic r) => Proxy r -> Constr r
 mkConstr _ = mkConstr' (to :: Rep r x -> r)
 
@@ -81,8 +103,15 @@ aesonOpts
   , A.fieldLabelModifier = drop 1
   }
 
-type Empty = Maybe Void.Void -- Use this instead of () as Aeson can omit Nothing fields
+-- | Empty ~= ()
+-- However, we use this instead of () as Aeson has an option
+-- to omit Nothing fields, so when we try to encode a type
+-- X { foo :: Empty, bar :: Int, baz :: Empty },
+-- the resultant JSON doesn't contain spurious fields for
+-- foo and baz, just a single field for bar
+type Empty = Maybe Void.Void
 
+-- | Untagged union type - used for aeson instances
 data (:|:) a b = InL a | InR b deriving (Eq, Show, Ord)
 
 instance (A.ToJSON a, A.ToJSON b) => A.ToJSON (a :|: b) where
@@ -92,35 +121,50 @@ instance (A.ToJSON a, A.ToJSON b) => A.ToJSON (a :|: b) where
 -- | An Id to identify a vertex or an edge.
 type LsifId = Int :|: Text
 
-type WhenV t l a = MatchV t '[ '(l,a) ]
-type WhenVs t xs a = MatchV t (Assoc xs a)
-
-type family Assoc (xs :: [a]) (y :: b) :: [(a,b)] where
-  Assoc '[] y = '[]
-  Assoc (x ': xs) y = '(x,y) ': (Assoc xs y)
-
+-- | Takes a list of VertexLabels paired with the type of their fields,
+-- and an ElementType, and returns the associated type of `t` if the
+-- ElementType is `Vertex t`.
+-- Similar to the value level `lookup` function in Prelude
 type family MatchV (l :: ElementType) (xs :: [(VertexLabel, Type)]) where
   MatchV (Vertex l) ('(l,t) ': xs) = t
   MatchV (Vertex l) ('(k,t) ': xs) = MatchV (Vertex l) xs
   MatchV a b = Empty
 
+-- | 'Match' specialised to a single type
+type WhenV t l a = MatchV t '[ '(l,a) ]
+-- | 'Match' specialised for the case where a bunch of types
+-- have the same associated type
+type WhenVs t xs a = MatchV t (Assoc xs a)
+
+-- | Helper for `WhenVs`: Pair each of a list of
+-- types with the same associated type
+type family Assoc (xs :: [a]) (y :: b) :: [(a,b)] where
+  Assoc '[] y = '[]
+  Assoc (x ': xs) y = '(x,y) ': (Assoc xs y)
+
+-- | Given type when the ElementType is an Edge, Empty otherwise
 type family WhenE (t :: ElementType) (a :: Type) where
   WhenE (Edge l) a = a
   WhenE t        a = Empty
 
+-- | Like WhenE, but allows you to match on the type of the edge
 type family WhenE1 (t :: ElementType) (l :: EdgeLabel) (a :: Type) where
   WhenE1 (Edge l) l a = a
   WhenE1 t        l a = Empty
 
+-- | Type of the LSIF `Label` given the `ElementType`
 type family Label (t :: ElementType) :: Type where
   Label (Vertex l) = SVertexLabel l
   Label (Edge l) = SEdgeLabel l
 
+-- | Type of the LSIF `Tag` given the `ElementType`
 type family Tag (t :: ElementType) :: Type where
   Tag (Vertex ('Range Untagged)) = Empty
   Tag (Vertex ('Range rt)) = RangeTag rt
   Tag a                    = Empty
 
+-- | Like WhenV, but checks if the ElementType is any kind of
+-- `Range`
 type family WhenRange (t :: ElementType) (a :: Type) :: Type where
   WhenRange (Vertex ('Range rt)) a = a
   WhenRange t          a = Empty
@@ -145,7 +189,7 @@ export interface LampShade extends V {
 1. Add `LampShade` to VertexLabel and SVertexLabel
 2. Add a type for LampShadeKind along with a ToJSON instance
 3. For any fields that already exist in Element(like `kind`), extend
-the MatchV typefamily to return the correct result.
+the MatchV type family application to return the correct result.
 
 Here, `_kind` goes from
 
@@ -161,6 +205,18 @@ to
 
 WhenV and WhenVs are simply special cases for MatchV defined for
 convienience. They can always be inlined to MatchV
+
+If the MatchV is getting too large or unwieldy, you can also write a new type
+family that returns the correct "kind" for "t" if "t" is supposed to have a
+"kind" field, and `Empty` otherwise.
+
+For example,
+
+type family Kind t where
+  Kind (Vertex 'Project) = Text
+  Kind (Vertex 'Moniker) = MonikerKind
+  Kind (Vertex 'LampShade) = LampShadeKind
+  Kind a = Empty
 
 5. Add a new type synonym
 
@@ -179,7 +235,7 @@ convienience. They can always be inlined to MatchV
 
 -}
 
--- | An element in the graph
+-- | The main type: An element in the graph
 data Element (t :: ElementType)
   = Element
   { _id    :: LsifId
@@ -545,36 +601,39 @@ instance A.ToJSON ImplementationEdge where
   toJSON = A.genericToJSON aesonOpts
 
 mkContainsEdge lid
-  = mkConstr (Proxy @(Element (Edge 'Contains))) lid SEdge SContains
+  = mkConstr (Proxy @ContainsEdge) lid SEdge SContains
 mkItemEdge lid
-  = mkConstr (Proxy @(Element (Edge 'Item))) lid SEdge SItem
+  = mkConstr (Proxy @ItemEdge) lid SEdge SItem
 mkRefersToEdge lid
-  = mkConstr (Proxy @(Element (Edge 'RefersTo))) lid SEdge SRefersTo
+  = mkConstr (Proxy @RefersToEdge) lid SEdge SRefersTo
 mkMonikerEdge lid
-  = mkConstr (Proxy @(Element (Edge 'EMoniker))) lid SEdge SEMoniker
+  = mkConstr (Proxy @MonikerEdge) lid SEdge SEMoniker
 mkPackageInformationEdge lid
-  = mkConstr (Proxy @(Element (Edge 'EPackageInformation))) lid SEdge SEPackageInformation
+  = mkConstr (Proxy @PackageInformationEdge) lid SEdge SEPackageInformation
 mkDocumentSymbolEdge lid
-  = mkConstr (Proxy @(Element (Edge 'TextDocument_DocumentSymbol))) lid SEdge STextDocument_DocumentSymbol
+  = mkConstr (Proxy @DocumentSymbolEdge) lid SEdge STextDocument_DocumentSymbol
 mkFoldingRangeEdge lid
-  = mkConstr (Proxy @(Element (Edge 'TextDocument_FoldingRange))) lid SEdge STextDocument_FoldingRange
+  = mkConstr (Proxy @FoldingRangeEdge) lid SEdge STextDocument_FoldingRange
 mkDocumentLinkEdge lid
-  = mkConstr (Proxy @(Element (Edge 'TextDocument_DocumentLink))) lid SEdge STextDocument_DocumentLink
+  = mkConstr (Proxy @DocumentLinkEdge) lid SEdge STextDocument_DocumentLink
 mkDiagnosticEdge lid
-  = mkConstr (Proxy @(Element (Edge 'TextDocument_Diagnostic))) lid SEdge STextDocument_Diagnostic
+  = mkConstr (Proxy @DiagnosticEdge) lid SEdge STextDocument_Diagnostic
 mkDefinitionEdge lid
-  = mkConstr (Proxy @(Element (Edge 'TextDocument_Definition))) lid SEdge STextDocument_Definition
+  = mkConstr (Proxy @DefinitionEdge) lid SEdge STextDocument_Definition
 mkDeclarationEdge lid
-  = mkConstr (Proxy @(Element (Edge 'TextDocument_Declaration))) lid SEdge STextDocument_Declaration
+  = mkConstr (Proxy @DeclarationEdge) lid SEdge STextDocument_Declaration
 mkTypeDefinitionEdge lid
-  = mkConstr (Proxy @(Element (Edge 'TextDocument_TypeDefinition))) lid SEdge STextDocument_TypeDefinition
+  = mkConstr (Proxy @TypeDefinitionEdge) lid SEdge STextDocument_TypeDefinition
 mkHoverEdge lid
-  = mkConstr (Proxy @(Element (Edge 'TextDocument_Hover))) lid SEdge STextDocument_Hover
+  = mkConstr (Proxy @HoverEdge) lid SEdge STextDocument_Hover
 mkReferencesEdge lid
-  = mkConstr (Proxy @(Element (Edge 'TextDocument_References))) lid SEdge STextDocument_References
+  = mkConstr (Proxy @ReferencesEdge) lid SEdge STextDocument_References
 mkImplementationEdge lid
-  = mkConstr (Proxy @(Element (Edge 'TextDocument_Implementation))) lid SEdge STextDocument_Implementation
+  = mkConstr (Proxy @ImplementationEdge) lid SEdge STextDocument_Implementation
 
+-- | Replace '_' with '/' and remove leading 'E's, as well as
+-- correct capitalisation to derive the correct JSON representation for
+-- EdgeLabels
 edgeOptions :: A.Options
 edgeOptions = aesonOpts { A.constructorTagModifier =
   \xs -> intercalate "/"
