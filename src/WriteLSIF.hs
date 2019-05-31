@@ -241,8 +241,10 @@ mkHoverContents :: HieAST PrintedType -> Maybe LSP.HoverContents
 mkHoverContents Node{nodeInfo} =
   case nodeType nodeInfo of
     [] -> Nothing
-    (x:_) -> let content = T.unlines ["```haskell",T.pack x,"```"] in
-      Just $ LSP.HoverContents $ LSP.MarkupContent LSP.MkMarkdown content
+    xs -> let content = T.unlines $ do
+                x <- xs
+                ["```haskell",T.pack x,"```"]
+          in Just $ LSP.HoverContents $ LSP.MarkupContent LSP.MkMarkdown content
 
 -- There are not higher equalities between edges.
 mkItemEdge :: LsifId -> LsifId -> LSIF.ItemEdgeProperties -> IndexStream ()
