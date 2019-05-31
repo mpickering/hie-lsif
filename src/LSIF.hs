@@ -74,8 +74,11 @@ instance (MkConstr a, MkConstr b) => MkConstr (a :*: b) where
 instance MkConstr (K1 m Empty) where
   mkConstr' k = k (K1 Nothing)
 
-instance {-# OVERLAPPABLE #-} MkConstr (K1 m a) where
-  mkConstr' k = unsafeCoerce $ k . K1
+instance {-# OVERLAPPABLE #-} MkConstr (K1 @k m a) where
+  mkConstr' k = coerce $ k . K1
+    where
+      coerce :: (a -> r) -> Args (K1 @k m a) r
+      coerce = unsafeCoerce
       -- This is safe as the only reason GHC is not able
       -- to reduce `Args (K1 m a) r` to `a -> r` is because
       -- of the overlapping type pattern:
