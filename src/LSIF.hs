@@ -128,6 +128,57 @@ type family WhenRange (t :: ElementType) (a :: Type) :: Type where
 data SomeElement where
   SomeElement :: forall t. Element t -> SomeElement
 
+{- UPDATING ELEMENT
+
+Suppose a new kind of vertex is added to the spec
+
+export interface LampShade extends V {
+
+	label: VertexLabels.lampshade;
+
+	kind: LampShadeKind;
+
+	shade: Int;
+
+}
+
+1. Add `LampShade` to VertexLabel and SVertexLabel
+2. Add a type for LampShadeKind along with a ToJSON instance
+3. For any fields that already exist in Element(like `kind`), extend
+the MatchV typefamily to return the correct result.
+
+Here, `_kind` goes from
+
+  , _kind     :: MatchV t '[ '( 'Project,Text), '( 'Moniker,MonikerKind)]
+
+to
+
+  , _kind     :: MatchV t '[ '( 'Project,Text), '( 'Moniker,MonikerKind ), '( 'LampShade, LampShadeKind)]
+
+4. for any new fields, add the field with the appropriate type guard:
+
+  , _ shade :: WhenV t 'LampShade Int
+
+WhenV and WhenVs are simply special cases for MatchV defined for
+convienience. They can always be inlined to MatchV
+
+5. Add a new type synonym
+
+  type LampShade = V 'LampShade
+
+6. Add the ToJSON instance
+
+  instance A.ToJSON LampShade where
+    toEncoding = A.genericToEncoding aesonOpts
+    toJSON = A.genericToJSON aesonOpts
+
+7. Add a constructor for LampShade
+
+  mkLampshade :: LsifId -> LampShadeKind -> Int -> LampShade
+  mkLampshade lid = mkConstr (Proxy @LampShade) lid SVertex SLampShade
+
+-}
+
 -- | An element in the graph
 data Element (t :: ElementType)
   = Element
