@@ -196,7 +196,7 @@ mkDocumentNode :: FilePath -> FilePath -> IndexStream LsifId
 mkDocumentNode root fp =
   let uri = (LSP.filePathToUri $ root </> fp)
       languageId = "haskell"
-  in uniqueNode' $ \i -> LSIF.mkDocument i uri languageId Nothing Nothing
+  in uniqueNode $ \i -> LSIF.mkDocument i uri languageId Nothing Nothing
 
 -- For a given identifier, make the ResultSet node and add the mapping
 -- from that identifier to its result set
@@ -212,13 +212,13 @@ mkResultSet n = do
 
 
 mkResultSetWithKey :: Name -> IndexStream LsifId
-mkResultSetWithKey n = uniqueNode' LSIF.mkResultSet
+mkResultSetWithKey n = uniqueNode LSIF.mkResultSet
   -- "resultSet" `vWith` ["key" .= nameToKey n]
 
 
 mkProjectVertex :: Maybe FilePath -> IndexStream LsifId
 mkProjectVertex mcabal_file =
-    uniqueNode' $ \i -> LSIF.mkProject i kind resource Nothing Nothing
+    uniqueNode $ \i -> LSIF.mkProject i kind resource Nothing Nothing
   where
     kind = "haskell"
     resource = LSP.filePathToUri <$> mcabal_file
@@ -230,12 +230,12 @@ mkHover range_id node =
     Nothing -> return ()
     Just c  -> do
       hr_id <- mkHoverResult c
-      void $ uniqueNode' $ \i ->
+      void $ uniqueNode $ \i ->
         LSIF.mkHoverEdge i range_id hr_id
 
 mkHoverResult :: LSP.HoverContents -> IndexStream LsifId
 mkHoverResult c =
-  uniqueNode' $ \i -> LSIF.mkHoverResult i (LSP.Hover c Nothing)
+  uniqueNode $ \i -> LSIF.mkHoverResult i (LSP.Hover c Nothing)
 
 mkHoverContents :: HieAST PrintedType -> Maybe LSP.HoverContents
 mkHoverContents Node{nodeInfo} =
@@ -248,27 +248,27 @@ mkHoverContents Node{nodeInfo} =
 
 -- There are not higher equalities between edges.
 mkItemEdge :: LsifId -> LsifId -> LSIF.ItemEdgeProperties -> IndexStream ()
-mkItemEdge from to prop = void . uniqueNode' $ \i ->
+mkItemEdge from to prop = void . uniqueNode $ \i ->
   LSIF.mkItemEdge i from to prop
 
 mkRefersTo, mkContainsEdge, mkRefEdge, mkDefEdge, mkDefinitionEdge
   , mkReferencesEdge, mkHoverEdge :: LsifId -> LsifId -> IndexStream ()
-mkRefersTo from to = void . uniqueNode' $ \i ->
+mkRefersTo from to = void . uniqueNode $ \i ->
   LSIF.mkRefersToEdge i from to
-mkContainsEdge from to = void . uniqueNode' $ \i ->
+mkContainsEdge from to = void . uniqueNode $ \i ->
   LSIF.mkContainsEdge i from to
-mkDefinitionEdge from to = void . uniqueNode' $ \i ->
+mkDefinitionEdge from to = void . uniqueNode $ \i ->
   LSIF.mkDefinitionEdge i from to
-mkReferencesEdge from to = void . uniqueNode' $ \i ->
+mkReferencesEdge from to = void . uniqueNode $ \i ->
   LSIF.mkReferencesEdge i from to
-mkHoverEdge from to = void . uniqueNode' $ \i ->
+mkHoverEdge from to = void . uniqueNode $ \i ->
   LSIF.mkHoverEdge i from to
 
 mkDefEdge from to = mkItemEdge from to LSIF.Definitions
 mkRefEdge from to = mkItemEdge from to LSIF.References
 
 mkDefinitionResult :: LsifId -> IndexStream LsifId
-mkDefinitionResult r = uniqueNode' $ \i ->
+mkDefinitionResult r = uniqueNode $ \i ->
  LSIF.mkDefinitionResult i (Just [LSIF.InL r])
 
 mkReferenceResult :: Name -> IndexStream LsifId
@@ -277,7 +277,7 @@ mkReferenceResult n = do
   case lookupNameEnv m n of
     Just i  -> return i
     Nothing -> do
-      i <- uniqueNode' $ \i -> LSIF.mkReferenceResult i Nothing Nothing Nothing Nothing
+      i <- uniqueNode $ \i -> LSIF.mkReferenceResult i Nothing Nothing Nothing Nothing
       modify (\s -> s { referenceResultMap = extendNameEnv m n i } )
       return i
 
@@ -288,7 +288,7 @@ mkRange s = do
   case M.lookup s m of
     Just i -> return i
     Nothing -> do
-      i <- uniqueNode' $ \i -> LSIF.mkUntaggedRange i (LSP.Position ls cs) (LSP.Position le ce)
+      i <- uniqueNode $ \i -> LSIF.mkUntaggedRange i (LSP.Position ls cs) (LSP.Position le ce)
       modify (\st -> st { rangeMap = M.insert s i m } )
       return i
 
@@ -312,8 +312,8 @@ getId = do
   return (LSIF.InL s)
 
 -- Tag a document with a unique ID
-uniqueNode' :: ToJSON a => (LSIF.LsifId -> a) -> IndexStream LsifId
-uniqueNode' k = do
+uniqueNode :: ToJSON a => (LSIF.LsifId -> a) -> IndexStream LsifId
+uniqueNode k = do
   i <- getId
   tellOne $ toJSON $ k i
   return i
