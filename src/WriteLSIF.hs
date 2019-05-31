@@ -230,8 +230,7 @@ mkHover range_id node =
     Nothing -> return ()
     Just c  -> do
       hr_id <- mkHoverResult c
-      void $ uniqueNode $ \i ->
-        LSIF.mkHoverEdge i range_id hr_id
+      mkHoverEdge range_id hr_id
 
 mkHoverResult :: LSP.HoverContents -> IndexStream LsifId
 mkHoverResult c =
