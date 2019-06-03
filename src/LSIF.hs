@@ -121,8 +121,23 @@ instance (A.ToJSON a, A.ToJSON b) => A.ToJSON (a :|: b) where
   toJSON (InL a) = A.toJSON a
   toJSON (InR b) = A.toJSON b
 
+data IdType
+  = RangeId
+  | VertexId VertexLabel
+  | EdgeId
+
 -- | An Id to identify a vertex or an edge.
-type LsifId = Int :|: Text
+data LsifId (a :: IdType) = IdInt Int | IdText Text
+  deriving (Eq,Ord,Show)
+
+instance A.ToJSON (LsifId a) where
+  toJSON (IdInt a) = A.toJSON a
+  toJSON (IdText b) = A.toJSON b
+
+type family ElementId (l :: ElementType) :: IdType where
+  ElementId (Edge l) = EdgeId
+  ElementId (Vertex ('Range a)) = 'RangeId
+  ElementId (Vertex l) = VertexId l
 
 -- | Takes a list of VertexLabels paired with the type of their fields,
 -- and an ElementType, and returns the associated type of `t` if the
@@ -145,15 +160,60 @@ type family Assoc (xs :: [a]) (y :: b) :: [(a,b)] where
   Assoc '[] y = '[]
   Assoc (x ': xs) y = '(x,y) ': (Assoc xs y)
 
--- | Given type when the ElementType is an Edge, Empty otherwise
-type family WhenE (t :: ElementType) (a :: Type) where
-  WhenE (Edge l) a = a
-  WhenE t        a = Empty
+type family RangeOrResultT (a :: RangeOrResult) where
+  RangeOrResultT RangeEdge = RangeId
+  RangeOrResultT ResultEdge = ResultSetId
 
--- | Like WhenE, but allows you to match on the type of the edge
-type family WhenE1 (t :: ElementType) (l :: EdgeLabel) (a :: Type) where
-  WhenE1 (Edge l) l a = a
-  WhenE1 t        l a = Empty
+-- | Given type when the ElementType is an Edge, Empty otherwise
+type family OutE (t :: ElementType) where
+  OutE (Edge ('Contains ProjDocContains)) = ProjectId
+  OutE (Edge ('Contains DocRangeContains)) = DocumentId
+  OutE (Edge ('Item RefRangeItem)) = ReferenceResultId
+  OutE (Edge ('Item RefRefItem)) = ReferenceResultId
+  OutE (Edge ('Item ImpRangeItem)) = ImplementationResultId
+  OutE (Edge ('Item ImpImpItem)) = ImplementationResultId
+  OutE (Edge 'RefersTo) = RangeId
+  OutE (Edge 'EMoniker) = RangeId
+  OutE (Edge 'EPackageInformation) = MonikerId
+  OutE (Edge 'TextDocument_DocumentSymbol) = DocumentId
+  OutE (Edge 'TextDocument_FoldingRange) = DocumentId
+  OutE (Edge 'TextDocument_DocumentLink) = DocumentId
+  OutE (Edge ('TextDocument_Diagnostic ProjDiag)) = ProjectId
+  OutE (Edge ('TextDocument_Diagnostic ProjDiag)) = DocumentId
+  OutE (Edge ('TextDocument_Definition a)) = RangeOrResultT a
+  OutE (Edge ('TextDocument_Declaration a)) = RangeOrResultT a
+  OutE (Edge ('TextDocument_TypeDefinition a)) = RangeOrResultT a
+  OutE (Edge ('TextDocument_Hover a)) = RangeOrResultT a
+  OutE (Edge ('TextDocument_References a)) = RangeOrResultT a
+  OutE (Edge ('TextDocument_Implementation a)) = RangeOrResultT a
+  OutE a = Empty
+
+type family InE (t :: ElementType) where
+  InE (Edge ('Contains ProjDocContains)) = DocumentId
+  InE (Edge ('Contains DocRangeContains)) = RangeId
+  InE (Edge ('Item RefRangeItem)) = RangeId
+  InE (Edge ('Item RefRefItem)) = ReferenceResultId
+  InE (Edge ('Item ImpRangeItem)) = RangeId
+  InE (Edge ('Item ImpImpItem)) = ImplementationResultId
+  InE (Edge 'RefersTo) = ResultSetId
+  InE (Edge 'EMoniker) = MonikerId
+  InE (Edge 'EPackageInformation) = PackageInformationId
+  InE (Edge 'TextDocument_DocumentSymbol) = DocumentSymbolResultId
+  InE (Edge 'TextDocument_FoldingRange) = FoldingRangeResultId
+  InE (Edge 'TextDocument_DocumentLink) = DocumentLinkResultId
+  InE (Edge ('TextDocument_Diagnostic a)) = DiagnosticResultId
+  InE (Edge ('TextDocument_Definition a)) = DefinitionResultId
+  InE (Edge ('TextDocument_Declaration a)) = DeclarationResultId
+  InE (Edge ('TextDocument_TypeDefinition a)) = TypeDefinitionResultId
+  InE (Edge ('TextDocument_Hover a)) = HoverResultId
+  InE (Edge ('TextDocument_References a)) = ReferenceResultId
+  InE (Edge ('TextDocument_Implementation a)) = ImplementationResultId
+  InE a = Empty
+
+-- | Type of the LSIF `Property` given the `ElementType`
+type family Property (t :: ElementType) where
+  Property (Edge (Item a)) = Maybe ItemEdgeProperties
+  Property a = Empty
 
 -- | Type of the LSIF `Label` given the `ElementType`
 type family Label (t :: ElementType) :: Type where
@@ -241,17 +301,17 @@ type family Kind t where
 -- | The main type: An element in the graph
 data Element (t :: ElementType)
   = Element
-  { _id    :: LsifId
+  { _id    :: LsifId (ElementId t)
   , _type  :: SElementType t
 
   , _label :: Label t
 
   , _tag   :: Tag t
 
-  , _outV :: WhenE t LsifId
-  , _inV  :: WhenE t LsifId
+  , _outV :: OutE t
+  , _inV  :: InE t
 
-  , _property :: WhenE1 t 'Item ItemEdgeProperties
+  , _property :: Property t
 
   , _start :: WhenRange t LSP.Position
   , _end   :: WhenRange t LSP.Position
@@ -281,9 +341,9 @@ data Element (t :: ElementType)
   , _declarations :: WhenV t 'ReferenceResult (Maybe [RangeId :|: LSP.Location])
   , _definitions  :: WhenV t 'ReferenceResult (Maybe [RangeId :|: LSP.Location])
   , _references   :: WhenV t 'ReferenceResult (Maybe [RangeId :|: LSP.Location])
-  , _referenceResults :: WhenV t 'ReferenceResult (Maybe [LsifId])
+  , _referenceResults :: WhenV t 'ReferenceResult (Maybe [LsifId (VertexId 'ReferenceResult)])
 
-  , _implementationResults :: WhenV t 'ImplementationResult (Maybe [LsifId])
+  , _implementationResults :: WhenV t 'ImplementationResult (Maybe [LsifId (VertexId 'ImplementationResult)])
 
   , _result :: Result t
   } deriving Generic
@@ -428,7 +488,7 @@ instance A.ToJSON (SElementType a) where
   toJSON SVertex = A.toJSON "vertex"
   toJSON SEdge = A.toJSON "edge"
 
-type RangeId = LsifId
+type RangeId = LsifId 'RangeId
 
 -- | All known vertices label types
 data VertexLabel
@@ -450,6 +510,25 @@ data VertexLabel
   | HoverResult
   | ReferenceResult
   | ImplementationResult
+
+type MetaDataId = LsifId (VertexId 'MetaData)
+type ProjectId = LsifId (VertexId 'Project)
+type LocationId = LsifId (VertexId 'Location)
+type DocumentId = LsifId (VertexId 'Document)
+type MonikerId = LsifId (VertexId 'Moniker)
+type PackageInformationId = LsifId (VertexId 'PackageInformation)
+type ResultSetId = LsifId (VertexId 'ResultSet)
+type DocumentSymbolResultId = LsifId (VertexId 'DocumentSymbolResult)
+type FoldingRangeResultId = LsifId (VertexId 'FoldingRangeResult)
+type DocumentLinkResultId = LsifId (VertexId 'DocumentLinkResult)
+type DiagnosticResultId = LsifId (VertexId 'DiagnosticResult)
+type DeclarationResultId = LsifId (VertexId 'DeclarationResult)
+type DefinitionResultId = LsifId (VertexId 'DefinitionResult)
+type TypeDefinitionResultId = LsifId (VertexId 'TypeDefinitionResult)
+type HoverResultId = LsifId (VertexId 'HoverResult)
+type ReferenceResultId = LsifId (VertexId 'ReferenceResult)
+type ImplementationResultId = LsifId (VertexId 'ImplementationResult)
+
 
 data SVertexLabel (v :: VertexLabel) where
   SMetaData             :: SVertexLabel 'MetaData
@@ -521,46 +600,99 @@ instance A.ToJSON (SRangeTagType rt) where
   toJSON SReference   = A.toJSON Reference
   toJSON SUnknown     = A.toJSON Unknown
 
+data ContainsType
+  = ProjDocContains
+  | DocRangeContains
+  deriving (Eq,Ord,Generic,Show)
+
+data ItemsType
+  = RefRangeItem
+  | RefRefItem
+  | ImpRangeItem
+  | ImpImpItem
+  deriving (Eq,Ord,Generic,Show)
+
+data DocOrProjDiag
+  = DocDiag
+  | ProjDiag
+  deriving (Eq,Ord,Generic,Show)
+
+data RangeOrResult
+  = RangeEdge
+  | ResultEdge
+  deriving (Eq,Ord,Generic,Show)
+
 data EdgeLabel
-  = Contains
-  | Item
+  = Contains ContainsType
+  | Item ItemsType
   | RefersTo
   | EMoniker
   | EPackageInformation
   | TextDocument_DocumentSymbol
   | TextDocument_FoldingRange
   | TextDocument_DocumentLink
-  | TextDocument_Diagnostic
-  | TextDocument_Definition
-  | TextDocument_Declaration
-  | TextDocument_TypeDefinition
-  | TextDocument_Hover
-  | TextDocument_References
-  | TextDocument_Implementation
-  deriving (Eq,Ord,Generic,Enum,Show)
+  | TextDocument_Diagnostic DocOrProjDiag
+  | TextDocument_Definition RangeOrResult
+  | TextDocument_Declaration RangeOrResult
+  | TextDocument_TypeDefinition RangeOrResult
+  | TextDocument_Hover RangeOrResult
+  | TextDocument_References RangeOrResult
+  | TextDocument_Implementation RangeOrResult
+  deriving (Eq,Ord,Generic,Show)
 
 type E l = Element (Edge l)
 
-type ContainsEdge = E 'Contains
-type ItemEdge = E 'Item
+type ContainsEdge a = E ('Contains a)
+type ContainsProjDocEdge = ContainsEdge 'ProjDocContains
+type ContainsDocRangeEdge = ContainsEdge 'DocRangeContains
+
+type ItemEdge a = E ('Item a)
+type ItemRefRangeEdge = ItemEdge 'RefRangeItem
+type ItemRefRefEdge = ItemEdge 'RefRefItem
+type ItemImpRangeEdge = ItemEdge 'ImpRangeItem
+type ItemImpImpEdge = ItemEdge 'ImpImpItem
+
 type RefersToEdge = E 'RefersTo
 type MonikerEdge = E 'EMoniker
 type PackageInformationEdge = E 'EPackageInformation
 type DocumentSymbolEdge = E 'TextDocument_DocumentSymbol
 type FoldingRangeEdge = E 'TextDocument_FoldingRange
 type DocumentLinkEdge = E 'TextDocument_DocumentLink
-type DiagnosticEdge = E 'TextDocument_Diagnostic
-type DefinitionEdge = E 'TextDocument_Definition
-type DeclarationEdge = E 'TextDocument_Declaration
-type TypeDefinitionEdge = E 'TextDocument_TypeDefinition
-type HoverEdge = E 'TextDocument_Hover
-type ReferencesEdge = E 'TextDocument_References
-type ImplementationEdge = E 'TextDocument_Implementation
 
-instance A.ToJSON ContainsEdge where
+type DiagnosticEdge a = E ('TextDocument_Diagnostic a)
+type DiagnosticDocEdge = DiagnosticEdge 'DocDiag
+type DiagnosticProjEdge = DiagnosticEdge 'ProjDiag
+
+type DefinitionRangeEdge = E ('TextDocument_Definition RangeEdge)
+type DeclarationRangeEdge = E ('TextDocument_Declaration RangeEdge)
+type TypeDefinitionRangeEdge = E ('TextDocument_TypeDefinition RangeEdge)
+type HoverRangeEdge = E ('TextDocument_Hover RangeEdge)
+type ReferencesRangeEdge = E ('TextDocument_References RangeEdge)
+type ImplementationRangeEdge = E ('TextDocument_Implementation RangeEdge)
+
+type DefinitionResultEdge = E ('TextDocument_Definition ResultEdge)
+type DeclarationResultEdge = E ('TextDocument_Declaration ResultEdge)
+type TypeDefinitionResultEdge = E ('TextDocument_TypeDefinition ResultEdge)
+type HoverResultEdge = E ('TextDocument_Hover ResultEdge)
+type ReferencesResultEdge = E ('TextDocument_References ResultEdge)
+type ImplementationResultEdge = E ('TextDocument_Implementation ResultEdge)
+
+instance A.ToJSON ContainsProjDocEdge where
   toEncoding = A.genericToEncoding aesonOpts
   toJSON = A.genericToJSON aesonOpts
-instance A.ToJSON ItemEdge where
+instance A.ToJSON ContainsDocRangeEdge where
+  toEncoding = A.genericToEncoding aesonOpts
+  toJSON = A.genericToJSON aesonOpts
+instance A.ToJSON ItemRefRangeEdge where
+  toEncoding = A.genericToEncoding aesonOpts
+  toJSON = A.genericToJSON aesonOpts
+instance A.ToJSON ItemRefRefEdge where
+  toEncoding = A.genericToEncoding aesonOpts
+  toJSON = A.genericToJSON aesonOpts
+instance A.ToJSON ItemImpRangeEdge where
+  toEncoding = A.genericToEncoding aesonOpts
+  toJSON = A.genericToJSON aesonOpts
+instance A.ToJSON ItemImpImpEdge where
   toEncoding = A.genericToEncoding aesonOpts
   toJSON = A.genericToJSON aesonOpts
 instance A.ToJSON RefersToEdge where
@@ -581,32 +713,61 @@ instance A.ToJSON FoldingRangeEdge where
 instance A.ToJSON DocumentLinkEdge where
   toEncoding = A.genericToEncoding aesonOpts
   toJSON = A.genericToJSON aesonOpts
-instance A.ToJSON DiagnosticEdge where
+instance A.ToJSON DiagnosticDocEdge where
   toEncoding = A.genericToEncoding aesonOpts
   toJSON = A.genericToJSON aesonOpts
-instance A.ToJSON DefinitionEdge where
+instance A.ToJSON DiagnosticProjEdge where
   toEncoding = A.genericToEncoding aesonOpts
   toJSON = A.genericToJSON aesonOpts
-instance A.ToJSON DeclarationEdge where
+instance A.ToJSON DefinitionRangeEdge where
   toEncoding = A.genericToEncoding aesonOpts
   toJSON = A.genericToJSON aesonOpts
-instance A.ToJSON TypeDefinitionEdge where
+instance A.ToJSON DeclarationRangeEdge where
   toEncoding = A.genericToEncoding aesonOpts
   toJSON = A.genericToJSON aesonOpts
-instance A.ToJSON HoverEdge where
+instance A.ToJSON TypeDefinitionRangeEdge where
   toEncoding = A.genericToEncoding aesonOpts
   toJSON = A.genericToJSON aesonOpts
-instance A.ToJSON ReferencesEdge where
+instance A.ToJSON HoverRangeEdge where
   toEncoding = A.genericToEncoding aesonOpts
   toJSON = A.genericToJSON aesonOpts
-instance A.ToJSON ImplementationEdge where
+instance A.ToJSON ReferencesRangeEdge where
+  toEncoding = A.genericToEncoding aesonOpts
+  toJSON = A.genericToJSON aesonOpts
+instance A.ToJSON ImplementationRangeEdge where
+  toEncoding = A.genericToEncoding aesonOpts
+  toJSON = A.genericToJSON aesonOpts
+instance A.ToJSON DefinitionResultEdge where
+  toEncoding = A.genericToEncoding aesonOpts
+  toJSON = A.genericToJSON aesonOpts
+instance A.ToJSON DeclarationResultEdge where
+  toEncoding = A.genericToEncoding aesonOpts
+  toJSON = A.genericToJSON aesonOpts
+instance A.ToJSON TypeDefinitionResultEdge where
+  toEncoding = A.genericToEncoding aesonOpts
+  toJSON = A.genericToJSON aesonOpts
+instance A.ToJSON HoverResultEdge where
+  toEncoding = A.genericToEncoding aesonOpts
+  toJSON = A.genericToJSON aesonOpts
+instance A.ToJSON ReferencesResultEdge where
+  toEncoding = A.genericToEncoding aesonOpts
+  toJSON = A.genericToJSON aesonOpts
+instance A.ToJSON ImplementationResultEdge where
   toEncoding = A.genericToEncoding aesonOpts
   toJSON = A.genericToJSON aesonOpts
 
-mkContainsEdge lid
-  = mkConstr (Proxy @ContainsEdge) lid SEdge SContains
-mkItemEdge lid
-  = mkConstr (Proxy @ItemEdge) lid SEdge SItem
+mkContainsProjDocEdge lid
+  = mkConstr (Proxy @ContainsProjDocEdge) lid SEdge SContains
+mkContainsDocRangeEdge lid
+  = mkConstr (Proxy @ContainsDocRangeEdge) lid SEdge SContains
+mkItemRefRangeEdge lid =
+  mkConstr (Proxy @ItemRefRangeEdge) lid SEdge SItem
+mkItemRefRefEdge lid =
+  mkConstr (Proxy @ItemRefRefEdge) lid SEdge SItem
+mkItemImpRangeEdge lid =
+  mkConstr (Proxy @ItemImpRangeEdge) lid SEdge SItem
+mkItemImpImpEdge lid =
+  mkConstr (Proxy @ItemImpImpEdge) lid SEdge SItem
 mkRefersToEdge lid
   = mkConstr (Proxy @RefersToEdge) lid SEdge SRefersTo
 mkMonikerEdge lid
@@ -619,70 +780,68 @@ mkFoldingRangeEdge lid
   = mkConstr (Proxy @FoldingRangeEdge) lid SEdge STextDocument_FoldingRange
 mkDocumentLinkEdge lid
   = mkConstr (Proxy @DocumentLinkEdge) lid SEdge STextDocument_DocumentLink
-mkDiagnosticEdge lid
-  = mkConstr (Proxy @DiagnosticEdge) lid SEdge STextDocument_Diagnostic
-mkDefinitionEdge lid
-  = mkConstr (Proxy @DefinitionEdge) lid SEdge STextDocument_Definition
-mkDeclarationEdge lid
-  = mkConstr (Proxy @DeclarationEdge) lid SEdge STextDocument_Declaration
-mkTypeDefinitionEdge lid
-  = mkConstr (Proxy @TypeDefinitionEdge) lid SEdge STextDocument_TypeDefinition
-mkHoverEdge lid
-  = mkConstr (Proxy @HoverEdge) lid SEdge STextDocument_Hover
-mkReferencesEdge lid
-  = mkConstr (Proxy @ReferencesEdge) lid SEdge STextDocument_References
-mkImplementationEdge lid
-  = mkConstr (Proxy @ImplementationEdge) lid SEdge STextDocument_Implementation
-
--- | Replace '_' with '/' and remove leading 'E's, as well as
--- correct capitalisation to derive the correct JSON representation for
--- EdgeLabels
-edgeOptions :: A.Options
-edgeOptions = aesonOpts { A.constructorTagModifier =
-  \xs -> intercalate "/"
-       $ map (A.constructorTagModifier aesonOpts)
-       $ words
-       $ map (\c -> if c == '_' then ' ' else c)
-       $ maybe xs id (stripPrefix "E" xs)
-  }
-
-instance A.ToJSON EdgeLabel where
-  toEncoding = A.genericToEncoding edgeOptions
-  toJSON = A.genericToJSON edgeOptions
+mkDiagnosticDocEdge lid
+  = mkConstr (Proxy @DiagnosticDocEdge) lid SEdge STextDocument_Diagnostic
+mkDiagnosticProjEdge lid
+  = mkConstr (Proxy @DiagnosticProjEdge) lid SEdge STextDocument_Diagnostic
+mkDefinitionRangeEdge lid
+  = mkConstr (Proxy @DefinitionRangeEdge) lid SEdge STextDocument_Definition
+mkDeclarationRangeEdge lid
+  = mkConstr (Proxy @DeclarationRangeEdge) lid SEdge STextDocument_Declaration
+mkTypeDefinitionRangeEdge lid
+  = mkConstr (Proxy @TypeDefinitionRangeEdge) lid SEdge STextDocument_TypeDefinition
+mkHoverRangeEdge lid
+  = mkConstr (Proxy @HoverRangeEdge) lid SEdge STextDocument_Hover
+mkReferencesRangeEdge lid
+  = mkConstr (Proxy @ReferencesRangeEdge) lid SEdge STextDocument_References
+mkImplementationRangeEdge lid
+  = mkConstr (Proxy @ImplementationRangeEdge) lid SEdge STextDocument_Implementation
+mkDefinitionResultEdge lid
+  = mkConstr (Proxy @DefinitionResultEdge) lid SEdge STextDocument_Definition
+mkDeclarationResultEdge lid
+  = mkConstr (Proxy @DeclarationResultEdge) lid SEdge STextDocument_Declaration
+mkTypeDefinitionResultEdge lid
+  = mkConstr (Proxy @TypeDefinitionResultEdge) lid SEdge STextDocument_TypeDefinition
+mkHoverResultEdge lid
+  = mkConstr (Proxy @HoverResultEdge) lid SEdge STextDocument_Hover
+mkReferencesResultEdge lid
+  = mkConstr (Proxy @ReferencesResultEdge) lid SEdge STextDocument_References
+mkImplementationResultEdge lid
+  = mkConstr (Proxy @ImplementationResultEdge) lid SEdge STextDocument_Implementation
 
 data SEdgeLabel (el :: EdgeLabel) where
-  SContains :: SEdgeLabel Contains
-  SItem :: SEdgeLabel Item
+  SContains :: SEdgeLabel (Contains a)
+  SItem :: SEdgeLabel (Item a)
   SRefersTo :: SEdgeLabel RefersTo
   SEMoniker :: SEdgeLabel EMoniker
   SEPackageInformation :: SEdgeLabel EPackageInformation
   STextDocument_DocumentSymbol :: SEdgeLabel TextDocument_DocumentSymbol
   STextDocument_FoldingRange :: SEdgeLabel TextDocument_FoldingRange
   STextDocument_DocumentLink :: SEdgeLabel TextDocument_DocumentLink
-  STextDocument_Diagnostic :: SEdgeLabel TextDocument_Diagnostic
-  STextDocument_Definition :: SEdgeLabel TextDocument_Definition
-  STextDocument_Declaration :: SEdgeLabel TextDocument_Declaration
-  STextDocument_TypeDefinition :: SEdgeLabel TextDocument_TypeDefinition
-  STextDocument_Hover :: SEdgeLabel TextDocument_Hover
-  STextDocument_References :: SEdgeLabel TextDocument_References
-  STextDocument_Implementation :: SEdgeLabel TextDocument_Implementation
+  STextDocument_Diagnostic :: SEdgeLabel (TextDocument_Diagnostic a)
+  STextDocument_Definition :: SEdgeLabel (TextDocument_Definition a)
+  STextDocument_Declaration :: SEdgeLabel (TextDocument_Declaration a)
+  STextDocument_TypeDefinition :: SEdgeLabel (TextDocument_TypeDefinition a)
+  STextDocument_Hover :: SEdgeLabel (TextDocument_Hover a)
+  STextDocument_References :: SEdgeLabel (TextDocument_References a)
+  STextDocument_Implementation :: SEdgeLabel (TextDocument_Implementation a)
 
 instance A.ToJSON (SEdgeLabel (el :: EdgeLabel)) where
-  toJSON SContains = A.toJSON Contains
-  toJSON SItem = A.toJSON Item
-  toJSON SRefersTo = A.toJSON RefersTo
-  toJSON SEMoniker = A.toJSON EMoniker
-  toJSON SEPackageInformation = A.toJSON EPackageInformation
-  toJSON STextDocument_DocumentSymbol = A.toJSON TextDocument_DocumentSymbol
-  toJSON STextDocument_FoldingRange = A.toJSON TextDocument_FoldingRange
-  toJSON STextDocument_DocumentLink = A.toJSON TextDocument_DocumentLink
-  toJSON STextDocument_Diagnostic = A.toJSON TextDocument_Diagnostic
-  toJSON STextDocument_Definition = A.toJSON TextDocument_Definition
-  toJSON STextDocument_Declaration = A.toJSON TextDocument_Declaration
-  toJSON STextDocument_TypeDefinition = A.toJSON TextDocument_TypeDefinition
-  toJSON STextDocument_Hover = A.toJSON TextDocument_Hover
-  toJSON STextDocument_References = A.toJSON TextDocument_References
-  toJSON STextDocument_Implementation = A.toJSON TextDocument_Implementation
+  toJSON SContains = A.toJSON "contains"
+  toJSON SItem = A.toJSON "item"
+  toJSON SRefersTo = A.toJSON "refersTo"
+  toJSON SEMoniker = A.toJSON "moniker"
+  toJSON SEPackageInformation = A.toJSON "packageInformation"
+  toJSON STextDocument_DocumentSymbol = A.toJSON "textDocument/documentSymbol"
+  toJSON STextDocument_FoldingRange = A.toJSON "textDocument/foldingRange"
+  toJSON STextDocument_DocumentLink = A.toJSON "textDocument/documentLink"
+  toJSON STextDocument_Diagnostic = A.toJSON "textDocument/diagnostic"
+  toJSON STextDocument_Definition = A.toJSON "textDocument/definition"
+  toJSON STextDocument_Declaration = A.toJSON "textDocument/declaration"
+  toJSON STextDocument_TypeDefinition = A.toJSON "textDocument/typeDefinition"
+  toJSON STextDocument_Hover = A.toJSON "textDocument/hover"
+  toJSON STextDocument_References = A.toJSON "textDocument/references"
+  toJSON STextDocument_Implementation = A.toJSON "textDocument/implementation"
 
 type family When2 (a :: k) (b :: k) (c :: k) (t :: Type) :: Type where
   When2 a a b t = t
@@ -725,7 +884,7 @@ instance A.ToJSON UnknownTag where
 
 data RangeBasedDocumentSymbol
   = RangeBasedDocumentSymbol
-  { _id :: LsifId
+  { _id :: RangeId
   , _children :: Maybe [RangeBasedDocumentSymbol]
   } deriving (Generic)
 

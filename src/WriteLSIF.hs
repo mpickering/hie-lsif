@@ -2,6 +2,7 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE TupleSections #-}
 {-# LANGUAGE NamedFieldPuns #-}
+{-# LANGUAGE DataKinds #-}
 {- Generate an LSIF file from an HIE file -}
 module WriteLSIF where
 
@@ -23,6 +24,9 @@ import Data.Aeson.Types
 
 import Data.Text(Text)
 import qualified Data.Text as T
+import qualified Data.Text.Encoding as T
+import Data.ByteString            ( ByteString )
+import qualified Data.ByteString.Base64 as B64
 
 import System.FilePath
 
@@ -40,9 +44,11 @@ import UniqSupply
 
 import qualified Language.Haskell.LSP.Types                 as LSP
 import qualified LSIF
-import LSIF (LsifId)
+import LSIF (LsifId, ElementId, Element, IdType(..), VertexLabel(..))
+import LSIF (RangeId, DefinitionResultId, ReferenceResultId, HoverResultId, ProjectId
+            , ResultSetId, DocumentId)
 
-type ModRef = (FilePath, Module, References PrintedType)
+type ModRef = (FilePath, Module, References PrintedType, ByteString)
 
 type IndexM a = StateT IndexS IO a
 
@@ -52,10 +58,10 @@ type IndexStream a = IndexStreamG Value a
 
 {- Global state of the indexer -}
 
-type ResultSetMap = NameEnv LsifId
-type ReferenceResultMap = NameEnv LsifId
-type RangeMap = M.Map RealSrcSpan LsifId
-type ModuleMap = M.Map Module LsifId
+type ResultSetMap = NameEnv LSIF.ResultSetId
+type ReferenceResultMap = NameEnv LSIF.ReferenceResultId
+type RangeMap = M.Map RealSrcSpan LSIF.RangeId
+-- type ModuleMap = M.Map Module (LsifId SomeId)
 
 data IndexS = IndexS
              { counter :: !Int
@@ -65,22 +71,29 @@ data IndexS = IndexS
              , rangeMap :: RangeMap
              -- Unused at the moment
              , exports :: [(Name, Int)]
-             , importMap :: ModuleMap }
+             }
+
+data Opts
+  = Opts
+  { root_dir :: FilePath
+  , hie_dir :: FilePath
+  , include_contents :: Bool
+  }
 
 initialState :: IO IndexS
 initialState = do
   uniq_supply <- mkSplitUniqSupply 'z'
   let nc = initNameCache uniq_supply []
-  return $ IndexS 1 nc emptyNameEnv emptyNameEnv M.empty [] M.empty
+  return $ IndexS 1 nc emptyNameEnv emptyNameEnv M.empty []
 
 addExport :: Name -> Int -> IndexStream ()
 addExport n rid = modify (\st -> st { exports = (n, rid) : exports st })
 
 {- Top level entry point -}
 
-generateFromDir :: FilePath -> FilePath -> IO ()
-generateFromDir root hie_dir =
-  getHieFilesIn hie_dir >>= writeJSON root . collectAllReferences
+generateFromDir :: Opts -> IO ()
+generateFromDir opts  =
+  getHieFilesIn (hie_dir opts) >>= writeJSON (root_dir opts) (include_contents opts) . collectAllReferences
 
 {- Read files into the stream, this ensures only one HIE file is in memory at once -}
 
@@ -96,9 +109,9 @@ collectReferences path = do
 
 {- Convert an HIE file into a LSIF file -}
 
-writeJSON :: FilePath -> IndexStreamG ModRef () -> IO ()
-writeJSON root r = do
-  writeLSIF (generateJSON root r)
+writeJSON :: FilePath -> Bool -> IndexStreamG ModRef () -> IO ()
+writeJSON root inc r = do
+  writeLSIF (generateJSON root inc r)
 
 -- LSIF needs to write an array but we have a stream of objects so
 -- we have to fake the list part, it's really annoying.
@@ -114,21 +127,25 @@ writeLSIF s = do
 
 {- Start making the aeson values to output -}
 
-generateJSON :: FilePath -> IndexStreamG ModRef () -> IndexStream ()
-generateJSON root m = do
+generateJSON :: FilePath -> Bool -> IndexStreamG ModRef () -> IndexStream ()
+generateJSON root inc m = do
   proj_node <- mkProjectVertex Nothing
   (St.for m (do_one_file proj_node))
   where
-    do_one_file :: LsifId -> ModRef -> IndexStream ()
-    do_one_file proj_node (fp, ref_mod, r) = do
-      dn <- mkDocument proj_node root fp
+    do_one_file :: ProjectId -> ModRef -> IndexStream ()
+    do_one_file proj_node (fp, ref_mod, r, contents) = do
+      let content' =
+            if inc
+            then Just $ T.decodeUtf8 $ B64.encode contents
+            else Nothing
+      dn <- mkDocument proj_node root fp content'
       St.for (St.each r) (mkReferences dn ref_mod)
 
 
-mkDocument :: LsifId -> FilePath -> FilePath -> IndexStream LsifId
-mkDocument proj_node root fp = do
-  doc <- mkDocumentNode root fp
-  mkContainsEdge proj_node doc
+mkDocument :: ProjectId -> FilePath -> FilePath -> Maybe Text -> IndexStream DocumentId
+mkDocument proj_node root fp content = do
+  doc <- mkDocumentNode root fp content
+  mkContainsProjDocEdge proj_node doc
   return doc
 
 -- Decide whether a reference is a bind or not.
@@ -144,7 +161,7 @@ getBind s = msum $ map go (S.toList s)
              _ -> Nothing
 
 -- Main function which makes the references/definition entries and emits them
-mkReferences :: LsifId -> Module -> Ref -> IndexStream ()
+mkReferences :: DocumentId -> Module -> Ref -> IndexStream ()
 mkReferences dn _ (ast, Right ref_id, id_details)
   | Just {} <- getBind (identInfo id_details) = do
     -- Definition
@@ -192,15 +209,15 @@ mkReferences _ _ (s, Left mn, _)  =
 nameToKey :: Name -> String
 nameToKey = getOccString
 
-mkDocumentNode :: FilePath -> FilePath -> IndexStream LsifId
-mkDocumentNode root fp =
+mkDocumentNode :: FilePath -> FilePath -> Maybe Text -> IndexStream DocumentId
+mkDocumentNode root fp content =
   let uri = (LSP.filePathToUri $ root </> fp)
       languageId = "haskell"
-  in uniqueNode $ \i -> LSIF.mkDocument i uri languageId Nothing Nothing
+  in uniqueNode $ \i -> LSIF.mkDocument i uri languageId Nothing content
 
 -- For a given identifier, make the ResultSet node and add the mapping
 -- from that identifier to its result set
-mkResultSet :: Name -> IndexStream LsifId
+mkResultSet :: Name -> IndexStream ResultSetId
 mkResultSet n = do
   m <- gets resultSetMap
   case lookupNameEnv m n of
@@ -211,12 +228,12 @@ mkResultSet n = do
       return i
 
 
-mkResultSetWithKey :: Name -> IndexStream LsifId
+mkResultSetWithKey :: Name -> IndexStream ResultSetId
 mkResultSetWithKey n = uniqueNode LSIF.mkResultSet
   -- "resultSet" `vWith` ["key" .= nameToKey n]
 
 
-mkProjectVertex :: Maybe FilePath -> IndexStream LsifId
+mkProjectVertex :: Maybe FilePath -> IndexStream ProjectId
 mkProjectVertex mcabal_file =
     uniqueNode $ \i -> LSIF.mkProject i kind resource Nothing Nothing
   where
@@ -224,7 +241,7 @@ mkProjectVertex mcabal_file =
     resource = LSP.filePathToUri <$> mcabal_file
 
 
-mkHover :: LsifId -> HieAST PrintedType -> IndexStream ()
+mkHover :: RangeId -> HieAST PrintedType -> IndexStream ()
 mkHover range_id node =
   case mkHoverContents node of
     Nothing -> return ()
@@ -232,7 +249,7 @@ mkHover range_id node =
       hr_id <- mkHoverResult c
       mkHoverEdge range_id hr_id
 
-mkHoverResult :: LSP.HoverContents -> IndexStream LsifId
+mkHoverResult :: LSP.HoverContents -> IndexStream HoverResultId
 mkHoverResult c =
   uniqueNode $ \i -> LSIF.mkHoverResult i (LSP.Hover c Nothing)
 
@@ -246,31 +263,35 @@ mkHoverContents Node{nodeInfo} =
           in Just $ LSP.HoverContents $ LSP.MarkupContent LSP.MkMarkdown content
 
 -- There are not higher equalities between edges.
-mkItemEdge :: LsifId -> LsifId -> LSIF.ItemEdgeProperties -> IndexStream ()
-mkItemEdge from to prop = void . uniqueNode $ \i ->
-  LSIF.mkItemEdge i from to prop
+-- mkItemEdge :: LsifId 'SomeId -> LsifId 'SomeId -> LSIF.ItemEdgeProperties -> IndexStream ()
+-- mkItemEdge from to prop = void . uniqueNode $ \i ->
+--   LSIF.mkItemEdge i from to prop
 
-mkRefersTo, mkContainsEdge, mkRefEdge, mkDefEdge, mkDefinitionEdge
-  , mkReferencesEdge, mkHoverEdge :: LsifId -> LsifId -> IndexStream ()
+-- mkRefersTo, mkContainsEdge, mkRefEdge, mkDefEdge, mkDefinitionEdge
+--   , mkReferencesEdge, mkHoverEdge :: LsifId -> LsifId -> IndexStream ()
 mkRefersTo from to = void . uniqueNode $ \i ->
   LSIF.mkRefersToEdge i from to
-mkContainsEdge from to = void . uniqueNode $ \i ->
-  LSIF.mkContainsEdge i from to
+mkContainsProjDocEdge from to = void . uniqueNode $ \i ->
+  LSIF.mkContainsProjDocEdge i from to
+mkContainsDocRangeEdge from to = void . uniqueNode $ \i ->
+  LSIF.mkContainsDocRangeEdge i from to
 mkDefinitionEdge from to = void . uniqueNode $ \i ->
-  LSIF.mkDefinitionEdge i from to
+  LSIF.mkDefinitionResultEdge i from to
 mkReferencesEdge from to = void . uniqueNode $ \i ->
-  LSIF.mkReferencesEdge i from to
+  LSIF.mkReferencesResultEdge i from to
 mkHoverEdge from to = void . uniqueNode $ \i ->
-  LSIF.mkHoverEdge i from to
+  LSIF.mkHoverRangeEdge i from to
 
-mkDefEdge from to = mkItemEdge from to LSIF.Definitions
-mkRefEdge from to = mkItemEdge from to LSIF.References
+mkDefEdge from to = void . uniqueNode $ \i ->
+  LSIF.mkItemRefRangeEdge i from to (Just LSIF.Definitions)
+mkRefEdge from to = void . uniqueNode $ \i ->
+  LSIF.mkItemRefRangeEdge i from to (Just LSIF.References)
 
-mkDefinitionResult :: LsifId -> IndexStream LsifId
+mkDefinitionResult :: RangeId -> IndexStream DefinitionResultId
 mkDefinitionResult r = uniqueNode $ \i ->
  LSIF.mkDefinitionResult i (Just [LSIF.InL r])
 
-mkReferenceResult :: Name -> IndexStream LsifId
+mkReferenceResult :: Name -> IndexStream ReferenceResultId
 mkReferenceResult n = do
   m <- gets referenceResultMap
   case lookupNameEnv m n of
@@ -281,7 +302,7 @@ mkReferenceResult n = do
       return i
 
 -- LSIF indexes from 0 rather than 1
-mkRange :: Span -> IndexStream LsifId
+mkRange :: Span -> IndexStream RangeId
 mkRange s = do
   m <- gets rangeMap
   case M.lookup s m of
@@ -298,20 +319,22 @@ mkRange s = do
     ce = srcSpanEndCol s - 1
 
 -- | Make a range and put bind it to the document
-mkRangeIn :: LsifId -> Span -> IndexStream LsifId
+mkRangeIn :: DocumentId -> Span -> IndexStream RangeId
 mkRangeIn doc s = do
   v <- mkRange s
-  void $ mkContainsEdge doc v
+  void $ mkContainsDocRangeEdge doc v
   return v
 
-getId :: IndexStream LsifId
+getId :: IndexStream (LsifId a)
 getId = do
   s <- gets counter
   modify (\st -> st { counter = s + 1 })
-  return (LSIF.InL s)
+  return (LSIF.IdInt s)
 
 -- Tag a document with a unique ID
-uniqueNode :: ToJSON a => (LSIF.LsifId -> a) -> IndexStream LsifId
+uniqueNode :: ToJSON (Element t)
+           => (LsifId (ElementId t) -> LSIF.Element t)
+           -> IndexStream (LsifId (ElementId t))
 uniqueNode k = do
   i <- getId
   tellOne $ toJSON $ k i

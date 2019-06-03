@@ -1,13 +1,22 @@
 module Main where
 
 import qualified WriteLSIF as LSIF
+import System.Directory
+import System.Environment
 
-fn = "file:///home/matt/hie-lsif/test/simple-tests/A.hs"
-mac_fn = "file:///Users/matt/hie-lsif/test/simple-tests/A.js"
-fn2 = "file:///home/matt/hie-lsif/test/simple-tests/A.js"
+defaultOpts :: IO LSIF.Opts
+defaultOpts = do
+  cwd <- getCurrentDirectory
+  return $ LSIF.Opts cwd cwd False
 
-root = "/Users/matt/hie-lsif/test/simple-tests/"
-root_groups = "/Users/matt/hie-lsif/groups-0.4.1.0/"
+parseOpts :: [String] -> LSIF.Opts -> LSIF.Opts
+parseOpts ("--root":dir:xs) o = (parseOpts xs o) { LSIF.root_dir = dir }
+parseOpts ("--hie":dir:xs) o = (parseOpts xs o) { LSIF.hie_dir = dir }
+parseOpts ("--include-contents":xs) o = (parseOpts xs o) { LSIF.include_contents = True }
+parseOpts xs o = o
 
 main :: IO ()
-main = LSIF.generateFromDir root_groups "test/hie-files/"
+main = do
+  args <- getArgs
+  opts <- defaultOpts
+  LSIF.generateFromDir (parseOpts args opts)
