@@ -15,6 +15,8 @@ import qualified Data.Map as M
 import System.Directory
 import System.FilePath
 
+import Data.ByteString            ( ByteString )
+
 
 type References a = [Reference a]
 
@@ -39,11 +41,12 @@ generateReferencesList ty_array hie = foldr (\ast m -> print_and_go ast ++ m) []
        where
          this = map (\(a, b) -> (ast,a, b)) (M.toList (nodeIdentifiers $ nodeInfo ast))
 
-genRefMap :: HieFile -> (FilePath, Module, References PrintedType)
-genRefMap hf = (fp, ref_mod, generateReferencesList (hie_types hf) $ getAsts $ (hie_asts hf))
+genRefMap :: HieFile -> (FilePath, Module, References PrintedType, ByteString)
+genRefMap hf = (fp, ref_mod, generateReferencesList (hie_types hf) $ getAsts $ (hie_asts hf),contents)
   where
     ref_mod = hie_module hf
     fp  = hie_hs_file hf
+    contents = hie_hs_src hf
 
 
 
