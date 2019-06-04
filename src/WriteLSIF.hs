@@ -19,8 +19,9 @@ import Control.Monad
 import Control.Monad.State.Strict
 import NameEnv
 
-import Data.Aeson
-import Data.Aeson.Types
+import Data.Aeson (ToJSON, encode)
+
+import Data.Foldable
 
 import Data.Text(Text)
 import qualified Data.Text as T
@@ -29,6 +30,7 @@ import Data.ByteString            ( ByteString )
 import qualified Data.ByteString.Base64 as B64
 
 import System.FilePath
+import System.Directory
 
 import LoadHIE
 
@@ -44,7 +46,7 @@ import UniqSupply
 
 import qualified Language.Haskell.LSP.Types                 as LSP
 import qualified LSIF
-import LSIF (LsifId, ElementId, Element, IdType(..), VertexLabel(..))
+import LSIF (LsifId, ElementId, Element)
 import LSIF (RangeId, DefinitionResultId, ReferenceResultId, HoverResultId, ProjectId
             , ResultSetId, DocumentId)
 
@@ -54,7 +56,7 @@ type IndexM a = StateT IndexS IO a
 
 type IndexStreamG v a =  Stream (Of v) (StateT IndexS IO) a
 
-type IndexStream a = IndexStreamG Value a
+type IndexStream a = IndexStreamG L.ByteString a
 
 {- Global state of the indexer -}
 
@@ -115,21 +117,27 @@ writeJSON root inc r = do
 
 -- LSIF needs to write an array but we have a stream of objects so
 -- we have to fake the list part, it's really annoying.
-writeLSIF :: Stream (Of Value) (StateT IndexS IO) r -> IO r
+writeLSIF :: Stream (Of L.ByteString) (StateT IndexS IO) r -> IO r
 writeLSIF s = do
   is <- initialState
   h <- IO.openFile "test.json" IO.WriteMode
   IO.hPutChar h '['
-  r <- flip evalStateT is . St.toHandle h . St.intersperse "," . St.map (L.unpack . encode) $ s
+  r <- flip evalStateT is . St.toHandle h . St.intersperse "," . St.map L.unpack $ s
   IO.hPutChar h ']'
   IO.hClose h
   return r
 
 {- Start making the aeson values to output -}
 
+findCabalFile :: FilePath -> IO (Maybe FilePath)
+findCabalFile root = do
+  files <- listDirectory root
+  return $ find ("cabal" `isExtensionOf`) files
+
 generateJSON :: FilePath -> Bool -> IndexStreamG ModRef () -> IndexStream ()
 generateJSON root inc m = do
-  proj_node <- mkProjectVertex Nothing
+  cabal_file <- liftIO $ findCabalFile root
+  proj_node <- mkProjectVertex cabal_file
   (St.for m (do_one_file proj_node))
   where
     do_one_file :: ProjectId -> ModRef -> IndexStream ()
@@ -169,7 +177,7 @@ mkReferences dn _ (ast, Right ref_id, id_details)
     rs <- mkResultSet ref_id
     def_range <- mkRangeIn dn s
     def_result <- mkDefinitionResult def_range
-    _ <- mkDefinitionEdge rs def_result
+    mkDefinitionEdge rs def_result
 
     -- Reference
     rr <- mkReferenceResult ref_id
@@ -229,7 +237,7 @@ mkResultSet n = do
 
 
 mkResultSetWithKey :: Name -> IndexStream ResultSetId
-mkResultSetWithKey n = uniqueNode LSIF.mkResultSet
+mkResultSetWithKey _n = uniqueNode LSIF.mkResultSet
   -- "resultSet" `vWith` ["key" .= nameToKey n]
 
 
@@ -262,28 +270,36 @@ mkHoverContents Node{nodeInfo} =
                 ["```haskell",T.pack x,"```"]
           in Just $ LSP.HoverContents $ LSP.MarkupContent LSP.MkMarkdown content
 
--- There are not higher equalities between edges.
--- mkItemEdge :: LsifId 'SomeId -> LsifId 'SomeId -> LSIF.ItemEdgeProperties -> IndexStream ()
--- mkItemEdge from to prop = void . uniqueNode $ \i ->
---   LSIF.mkItemEdge i from to prop
-
--- mkRefersTo, mkContainsEdge, mkRefEdge, mkDefEdge, mkDefinitionEdge
---   , mkReferencesEdge, mkHoverEdge :: LsifId -> LsifId -> IndexStream ()
+-- There are no higher equalities between edges, so we don't need to return EdgeIds
+mkRefersTo :: RangeId -> ResultSetId -> IndexStream ()
 mkRefersTo from to = void . uniqueNode $ \i ->
   LSIF.mkRefersToEdge i from to
+
+mkContainsProjDocEdge :: ProjectId -> DocumentId -> IndexStream ()
 mkContainsProjDocEdge from to = void . uniqueNode $ \i ->
   LSIF.mkContainsProjDocEdge i from to
+
+mkContainsDocRangeEdge :: DocumentId -> RangeId -> IndexStream ()
 mkContainsDocRangeEdge from to = void . uniqueNode $ \i ->
   LSIF.mkContainsDocRangeEdge i from to
+
+mkDefinitionEdge :: ResultSetId -> DefinitionResultId -> IndexStream ()
 mkDefinitionEdge from to = void . uniqueNode $ \i ->
   LSIF.mkDefinitionResultEdge i from to
+
+mkReferencesEdge :: ResultSetId -> ReferenceResultId -> IndexStream ()
 mkReferencesEdge from to = void . uniqueNode $ \i ->
   LSIF.mkReferencesResultEdge i from to
+
+mkHoverEdge :: RangeId -> HoverResultId -> IndexStream ()
 mkHoverEdge from to = void . uniqueNode $ \i ->
   LSIF.mkHoverRangeEdge i from to
 
+mkDefEdge :: ReferenceResultId -> RangeId -> IndexStream ()
 mkDefEdge from to = void . uniqueNode $ \i ->
   LSIF.mkItemRefRangeEdge i from to (Just LSIF.Definitions)
+
+mkRefEdge :: ReferenceResultId -> RangeId -> IndexStream ()
 mkRefEdge from to = void . uniqueNode $ \i ->
   LSIF.mkItemRefRangeEdge i from to (Just LSIF.References)
 
@@ -337,7 +353,7 @@ uniqueNode :: ToJSON (Element t)
            -> IndexStream (LsifId (ElementId t))
 uniqueNode k = do
   i <- getId
-  tellOne $ toJSON $ k i
+  tellOne $ encode $ k i
   return i
 
 tellOne :: a -> Stream (Of a) (StateT IndexS IO) ()
