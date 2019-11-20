@@ -5,8 +5,8 @@ let
           url = "https://downloads.haskell.org/~ghc/8.8.1-alpha1/ghc-8.8.0.20190424-x86_64-deb8-linux.tar.xz";
           hash = "0lizyz7prlq99f0l3mcl01ks6241v87l5mpr0dqzg7rxxl23i1mh"; };
 in
-  np.mkShell { buildInputs = [ ghc
-                               np.haskell.packages.ghc865.cabal-install
+  np.mkShell { buildInputs = [ np.haskell.compiler.ghc881
+                               np.haskellPackages.cabal-install
                                np.ncurses
                                np.icdiff
                                np.gist ]; }

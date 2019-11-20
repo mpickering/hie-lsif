@@ -1,4 +1,4 @@
-packages: . groups*/ lens*/
+packages: . groups*/
 repository head.hackage
   url: http://head.hackage.haskell.org/
   secure: True
@@ -8,8 +8,6 @@ repository head.hackage
   key-threshold: 3
 
 allow-newer: all
-
-constraints: primitive == 0.6.4.0
 
 -- Can't use relative paths here so this way doesn't work
 --package lens
