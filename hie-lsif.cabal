@@ -15,6 +15,8 @@ maintainer:          matthewtpickering@gmail.com
 -- category:
 extra-source-files:  CHANGELOG.md
 
+tested-with: GHC==8.8.1
+
 library
   exposed-modules: LoadHIE, WriteLSIF, LSIF
   -- other-modules:
